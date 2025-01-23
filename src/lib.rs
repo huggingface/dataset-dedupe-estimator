@@ -23,6 +23,8 @@ fn estimate(file_paths: Vec<String>) -> PyResult<()> {
         write_ppm(&segments, &output_file_path)?;
     }
 
+    // let output_file_path = format!("{}.ppm", file_paths.last().unwrap());
+    // write_ppm(&merged.segments(), &output_file_path)?;
 
     Ok(())
 }
