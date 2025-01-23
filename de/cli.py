@@ -44,8 +44,7 @@ def convert_dedupe_images_to_png(directory):
 
     for ppm in directory.iterdir():
         if ppm.suffix == ".ppm":
-            # simplify .parquet.dedupe_image.ppm suffixes
-            png = ppm.with_suffix("").with_suffix(".png")
+            png = ppm.with_suffix(".png")
             with Image.open(ppm) as img:
                 img.save(png, "PNG")
             ppm.unlink()
@@ -383,11 +382,11 @@ def stats(directory, skip_rewrite, skip_json_rewrite, skip_parquet_rewrite):
         path.with_name(path.stem + "-snappy-cdc.parquet") for path in files
     ]
 
-    print("Writing jsonlines files")
+    print("Writing JSONLines files")
     if not (skip_rewrite or skip_json_rewrite):
         process_map(rewrite_to_jsonlines, files, json_files)
 
-    print("Writing parquet files")
+    print("Writing CDC Parquet files")
     # TODO(kszucs): measure with max_data_page_size = 100 * 1024 * 1024
     if not (skip_rewrite or skip_parquet_rewrite):
         process_map(
@@ -405,27 +404,23 @@ def stats(directory, skip_rewrite, skip_json_rewrite, skip_parquet_rewrite):
             cdc_snappy_files,
         )
 
-    print("Estimating deduplication ratios")
-    record_titles = ["JSONLines", "Parquet", "CDC Snappy", "CDC ZSTD"]
+    
+    titles = ["JSONLines", "Parquet", "CDC Snappy", "CDC ZSTD"]
     column_titles = ["Total Bytes", "Chunk Bytes", "Compressed Chunk Bytes"]
 
-    results = thread_map(
-        de.estimate,
-        (json_files, files, cdc_snappy_files, cdc_zstd_files),
-        max_workers=4,
-    )
-
-    # dump the results to the console as a rich formatted table
-    for i, row in enumerate(results):
-        row["title"] = record_titles[i]
+    results = []
+    for i, paths in enumerate([json_files, files, cdc_snappy_files, cdc_zstd_files]):
+        title = titles[i]
+        print(f"Estimating deduplication for {title}")
+        results.append({"title": title, **de.estimate(paths)})
     pretty_print_stats(results)
 
     # plot the results using plotly if available
     y_keys = ["total_len", "chunk_bytes", "compressed_chunk_bytes"]
     fig = go.Figure(
         data=[
-            go.Bar(name=title, x=column_titles, y=[results[i][k] for k in y_keys])
-            for i, title in enumerate(record_titles)
+            go.Bar(name=results[i]["title"], x=column_titles, y=[results[i][k] for k in y_keys])
+            for i in range(len(results))
         ]
     )
     fig.show()

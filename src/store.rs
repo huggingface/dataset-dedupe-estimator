@@ -1,4 +1,5 @@
 use gearhash::Hasher;
+use indicatif::ParallelProgressIterator;
 use lz4_flex::block;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -44,30 +45,31 @@ impl ChunkStore {
         let mut store = ChunkStore::default();
         let mut hasher = Hasher::default();
         let mut buffer = [0; READ_BUFFER_SIZE];
-        let mut chunk = Vec::with_capacity(MAX_LEN);
+        let mut chunk = Vec::<u8>::with_capacity(MAX_LEN);
 
         loop {
             let bytes_read = reader.read(&mut buffer)?;
             if bytes_read == 0 {
                 break;
             }
-            store.total += bytes_read;
 
             let mut start = 0;
             while let Some(size) = hasher.next_match(&buffer[start..bytes_read], MASK) {
                 chunk.extend_from_slice(&buffer[start..start + size]);
                 start += size;
 
-                // max_len check is not entirey correct because the cpp implementation
-                // has checked that byte by byte, but this is good enough for now
-                if (chunk.len() >= MIN_LEN) || (chunk.len() >= MAX_LEN) {
+                // TODO(kszucs): MAX_LEN is not implemented yet
+                if chunk.len() >= MIN_LEN {
                     store.add(&chunk);
                     chunk.clear();
                 }
             }
             chunk.extend_from_slice(&buffer[start..bytes_read]);
-            store.add(&chunk);
         }
+
+        // add remaining as last chunk
+        store.add(&chunk);
+
         Ok(store)
     }
 
@@ -82,6 +84,7 @@ impl ChunkStore {
     ) -> Result<Vec<Self>, std::io::Error> {
         return paths
             .par_iter()
+            .progress_count(paths.len() as u64)
             .map(|path| ChunkStore::from_file(path))
             .collect();
     }

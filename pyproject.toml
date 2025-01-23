@@ -11,7 +11,19 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
-dependencies = ["click"]
+dependencies = [
+    "click",
+    "faker",
+    "humanize",
+    "jinja2",
+    "numpy",
+    "pandas",
+    "pillow",
+    "plotly",
+    "pyarrow",
+    "rich",
+    "tqdm",
+]
 
 [project.scripts]
 pina = "de.cli:cli"

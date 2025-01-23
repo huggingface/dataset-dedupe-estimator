@@ -103,6 +103,11 @@ const COLORS: [FRGB; 16] = [
     }, // Hot Pink
 ];
 
+#[inline(always)]
+fn getcolor(i: usize) -> FRGB {
+    COLORS[i % COLORS.len()]
+}
+
 fn interpolate_sample(s: &[usize], pos: f32) -> FRGB {
     if pos == pos.floor() {
         let mut ipos = pos as isize;
@@ -112,7 +117,7 @@ fn interpolate_sample(s: &[usize], pos: f32) -> FRGB {
         if ipos >= s.len() as isize {
             ipos = s.len() as isize - 1;
         }
-        COLORS[s[ipos as usize]]
+        return getcolor(s[ipos as usize]);
     } else {
         let mut ipos = pos as isize;
         if ipos < 0 {
@@ -123,8 +128,8 @@ fn interpolate_sample(s: &[usize], pos: f32) -> FRGB {
         }
         let left_weight = 1.0 - (pos - ipos as f32);
         let right_weight = 1.0 - left_weight;
-        let color_left = COLORS[s[ipos as usize]];
-        let color_right = COLORS[s[min(ipos as usize + 1, s.len() - 1)]];
+        let color_left = getcolor(s[ipos as usize]);
+        let color_right = getcolor(s[min(ipos as usize + 1, s.len() - 1)]);
         FRGB {
             r: left_weight * color_left.r + right_weight * color_right.r,
             g: left_weight * color_left.g + right_weight * color_right.g,
@@ -136,15 +141,18 @@ fn interpolate_sample(s: &[usize], pos: f32) -> FRGB {
 fn generate_color_sequence(s: &[usize]) -> Vec<RGB> {
     let mut ret = Vec::new();
     for i in 0..SEQUENCE_LENGTH {
-        let fpos = (i as f32 * s.len() as f32) / SEQUENCE_LENGTH as f32;
-        let fnextpos = ((i + 1) as f32 * s.len() as f32) / SEQUENCE_LENGTH as f32;
+        let mut fpos = (i * s.len()) as f32 / SEQUENCE_LENGTH as f32;
+        let fnextpos = ((i + 1) * s.len()) as f32 / SEQUENCE_LENGTH as f32;
+        if fpos > (s.len() - 1) as f32 {
+            fpos = (s.len() - 1) as f32;
+        }
         let mut color = FRGB {
             r: 0.0,
             g: 0.0,
             b: 0.0,
         };
         let mut weight = 0.0;
-        //for j in (fpos as usize)..(fnextpos as usize) {
+
         let mut j = fpos;
         while j < fnextpos {
             let sample = interpolate_sample(s, j);
