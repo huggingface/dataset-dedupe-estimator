@@ -31,7 +31,7 @@ fn estimate(file_paths: Vec<String>) -> PyResult<()> {
 
 /// A Python module implemented in Rust.
 #[pymodule]
-fn de(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(estimate, m)?)?;
     Ok(())
 }
