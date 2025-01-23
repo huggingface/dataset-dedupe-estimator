@@ -11,13 +11,14 @@ use store::ChunkStore;
 #[pyfunction]
 fn estimate(file_paths: Vec<String>) -> PyResult<(usize, usize, usize)> {
     let mut stores = ChunkStore::from_files(&file_paths)?;
+    let merged = ChunkStore::merge(&mut stores);
+
     for (store, file_path) in stores.iter().zip(file_paths.iter()) {
         let segments = store.segments();
         let output_file_path = format!("{}.ppm", file_path);
         write_ppm(&segments, &output_file_path)?;
     }
 
-    let merged = ChunkStore::merge(&mut stores);
     let file_dir = Path::new(file_paths.last().unwrap()).parent().unwrap();
     let output_file_path = file_dir.join("merged.ppm");
     write_ppm(&merged.segments(), &output_file_path.to_str().unwrap())?;

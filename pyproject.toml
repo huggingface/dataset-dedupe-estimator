@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.scripts]
-pina = "de.cli:cli"
+de = "de.cli:cli"
 
 [tool.maturin]
 module-name = "de.core"
