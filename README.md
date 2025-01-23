@@ -60,23 +60,25 @@ Checking out 03613ea
 Generate deduplication statistics for a directory of parquet files:
 
 ```bash
-❯ de stats /tmp/datasets
-Writing jsonlines files
-100%|██████████████████████████████████████████| 194/194 [01:03<00:00,  3.07it/s]
-Writing parquet files
-100%|██████████████████████████████████████████| 194/194 [00:21<00:00,  8.95it/s]
-100%|██████████████████████████████████████████| 194/194 [00:16<00:00, 11.90it/s]
-Estimating deduplication ratios
-100%|███████████████████████████████████████████| 4/4 [00:00<00:00, 37365.74it/s]
+❯ de stats /tmp/datasets                                                        
+Writing JSONLines files                                                          
+100%|██████████████████████████████████████████| 194/194 [01:22<00:00,  2.36it/s]
+Writing CDC Parquet files                                                        
+100%|██████████████████████████████████████████| 194/194 [00:19<00:00,  9.91it/s]
+100%|██████████████████████████████████████████| 194/194 [00:16<00:00, 11.91it/s]
+Estimating deduplication for JSONLines                                           
+Estimating deduplication for Parquet                                             
+Estimating deduplication for CDC Snappy                                          
+Estimating deduplication for CDC ZSTD                                            
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
 ┃            ┃            ┃            ┃             ┃             ┃ Compressed ┃
 ┃            ┃            ┃            ┃  Compressed ┃ Deduplicat… ┃ Deduplica… ┃
 ┃ Title      ┃ Total Size ┃ Chunk Size ┃  Chunk Size ┃       Ratio ┃      Ratio ┃
 ┡━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
-│ JSONLines  │   93.0 GiB │   62.7 GiB │    12.2 GiB │         67% │        13% │
-│ Parquet    │   16.2 GiB │   14.9 GiB │    13.3 GiB │         93% │        82% │
-│ CDC Snappy │   16.2 GiB │    8.1 GiB │     7.6 GiB │         50% │        47% │
-│ CDC ZSTD   │    8.9 GiB │    5.4 GiB │     5.4 GiB │         61% │        61% │
+│ JSONLines  │   93.0 GiB │   64.9 GiB │    12.4 GiB │         70% │        13% │
+│ Parquet    │   16.2 GiB │   15.0 GiB │    13.4 GiB │         93% │        83% │
+│ CDC Snappy │   16.2 GiB │    8.2 GiB │     7.8 GiB │         51% │        48% │
+│ CDC ZSTD   │    8.9 GiB │    5.5 GiB │     5.5 GiB │         62% │        62% │
 └────────────┴────────────┴────────────┴─────────────┴─────────────┴────────────┘
 ```
 
