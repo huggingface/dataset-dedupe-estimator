@@ -34,7 +34,7 @@ uneven sizes, but going to be robust to data updates/inserts/deletes.
 Compile:
 
 ```bash
-python setup.py develop
+maturin develop -r
 ```
 
 This will install a command line tool called `de`.
@@ -54,6 +54,8 @@ de synthetic -s 1 -e 1 '{"a": "int", "b": "str", "c": ["float"]}'
 ```
 
 Checkout all revisions of a file within a git repository:
+
+https://huggingface.co/datasets/cfahlgren1/hub-stats/blob/main/datasets.parquet
 
 ```bash
 ❯ de revisions -d /tmp/datasets ~/Datasets/hub-stats/datasets.parquet
@@ -107,6 +109,8 @@ including `$E` edits (inserted/deleted/updated block of 10 records) evenly
 distributed in the table and another variant with 5% of the records appended to
 the end. The resulting parquet files have `$S` row groups.
 
+The tool also generates .jsonlines files for comparison since content defined
+chunking is well suited for row major formats.
 
 {% for schema in [{"a": "int"}, {"a": "int", "b": "str", "c": ["float"]}] %}
 {% set cols = schema | count %}
@@ -146,3 +150,33 @@ The experiment can be reproduced by running the following command:
 {% endfor %}
 {% endfor %}
 {% endfor %}
+
+
+## Spaces
+
+https://huggingface.co/datasets/cfahlgren1/hub-stats/blob/main/spaces.parquet
+
+```bash
+❯ de stats /tmp/spaces                                                          
+Writing JSONLines files                                                          
+100%|██████████████████████████████████████████| 193/193 [07:14<00:00,  2.25s/it]
+Writing CDC Parquet files                                                        
+100%|██████████████████████████████████████████| 193/193 [00:38<00:00,  4.97it/s]
+100%|██████████████████████████████████████████| 193/193 [00:31<00:00,  6.12it/s]
+Estimating deduplication for JSONLines                                           
+Estimating deduplication for Parquet                                             
+Estimating deduplication for CDC Snappy                                          
+Estimating deduplication for CDC ZSTD                                            
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃            ┃            ┃            ┃             ┃             ┃ Compressed ┃
+┃            ┃            ┃            ┃  Compressed ┃ Deduplicat… ┃ Deduplica… ┃
+┃ Title      ┃ Total Size ┃ Chunk Size ┃  Chunk Size ┃       Ratio ┃      Ratio ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ JSONLines  │  157.8 GiB │   12.8 GiB │     2.7 GiB │          8% │         2% │
+│ Parquet    │   24.3 GiB │   23.5 GiB │    22.6 GiB │         97% │        93% │
+│ CDC Snappy │   24.3 GiB │    8.8 GiB │     8.5 GiB │         36% │        35% │
+│ CDC ZSTD   │   15.3 GiB │    6.2 GiB │     6.2 GiB │         41% │        41% │
+└────────────┴────────────┴────────────┴─────────────┴─────────────┴────────────┘
+```
+
+![Spaces Deduplication Statistics](images/spaces.png)

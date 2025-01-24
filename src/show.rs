@@ -20,7 +20,7 @@ const IMAGE_DIM: usize = 256;
 const BLOCK_DIM: usize = 8;
 const SEQUENCE_LENGTH: usize = (IMAGE_DIM / BLOCK_DIM) * IMAGE_DIM;
 
-const COLORS: [FRGB; 16] = [
+const COLORS: [FRGB; 32] = [
     FRGB {
         r: 0.0,
         g: 255.0,
@@ -101,6 +101,86 @@ const COLORS: [FRGB; 16] = [
         g: 105.0,
         b: 180.0,
     }, // Hot Pink
+    FRGB {
+        r: 255.0,
+        g: 20.0,
+        b: 147.0,
+    }, // Deep Pink
+    FRGB {
+        r: 75.0,
+        g: 0.0,
+        b: 130.0,
+    }, // Indigo
+    FRGB {
+        r: 240.0,
+        g: 230.0,
+        b: 140.0,
+    }, // Khaki
+    FRGB {
+        r: 173.0,
+        g: 216.0,
+        b: 230.0,
+    }, // Light Blue
+    FRGB {
+        r: 255.0,
+        g: 182.0,
+        b: 193.0,
+    }, // Light Pink
+    FRGB {
+        r: 144.0,
+        g: 238.0,
+        b: 144.0,
+    }, // Light Green
+    FRGB {
+        r: 255.0,
+        g: 255.0,
+        b: 224.0,
+    }, // Light Yellow
+    FRGB {
+        r: 0.0,
+        g: 255.0,
+        b: 127.0,
+    }, // Spring Green
+    FRGB {
+        r: 70.0,
+        g: 130.0,
+        b: 180.0,
+    }, // Steel Blue
+    FRGB {
+        r: 210.0,
+        g: 105.0,
+        b: 30.0,
+    }, // Chocolate
+    FRGB {
+        r: 255.0,
+        g: 69.0,
+        b: 0.0,
+    }, // Orange Red
+    FRGB {
+        r: 255.0,
+        g: 228.0,
+        b: 181.0,
+    }, // Moccasin
+    FRGB {
+        r: 255.0,
+        g: 218.0,
+        b: 185.0,
+    }, // Peach Puff
+    FRGB {
+        r: 255.0,
+        g: 240.0,
+        b: 245.0,
+    }, // Lavender Blush
+    FRGB {
+        r: 255.0,
+        g: 250.0,
+        b: 205.0,
+    }, // Lemon Chiffon
+    FRGB {
+        r: 255.0,
+        g: 228.0,
+        b: 225.0,
+    }, // Misty Rose
 ];
 
 #[inline(always)]
