@@ -7,7 +7,11 @@ should be provided together to see how much can be saved
 using a CDC based content addressable storage system.
 
 This tool is primarily designed to evaluate the deduplication
-effectiveness of a content defined chunking feature in Apache Arrow.
+effectiveness of a content defined chunking feature in Apache Parquet.
+
+[Apache Parquet](https://parquet.apache.org/) is a columnar storage format that
+is widely used in the data engineering community. It is a binary file format that
+stores data in a columnar fashion, which allows for efficient reads and writes.
 
 # Arrow C++ / PyArrow Implementation
 
@@ -89,15 +93,6 @@ It also generates a plot comparing the results:
 
 ![Datasets Deduplication Statistics](images/datasets.png)
 
-# Parquet Deduplication
-
-[Apache Parquet](https://parquet.apache.org/) is a columnar storage format that
-is widely used in the data engineering community. It is a binary file format that
-stores data in a columnar fashion, which allows for efficient reads and writes.
-
-## Brief Description of the Implementation
-
-TODO
 
 # Results on Synthetic Data
 
