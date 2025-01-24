@@ -11,7 +11,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from faker import Faker
-from tqdm.contrib.concurrent import process_map, thread_map
+from tqdm.contrib.concurrent import process_map
 from rich.console import Console
 from rich.table import Table
 import humanize
@@ -124,9 +124,33 @@ def write_parquet(path, table, **kwargs):
     assert table.equals(readback)
 
 
-def rewrite_to_parquet(src, dest, **kwargs):
-    table = pq.read_table(src)
-    write_parquet(dest, table, **kwargs)
+def rewrite_to_parquet(src_path, dest_path, block_size=1024 * 1024, **kwargs):
+    """
+    Reads a Parquet file in blocks and writes them out to another file.
+
+    :param src_path: Path to the source Parquet file.
+    :param dest_path: Path to the destination Parquet file.
+    :param block_size: Size of the blocks to read and write in bytes.
+    """
+    src_path = Path(src_path)
+    dest_path = Path(dest_path)
+
+    with pq.ParquetFile(src_path) as src:
+        schema = src.schema.to_arrow_schema()
+        writer = pq.ParquetWriter(dest_path, schema, **kwargs)
+        for batch in src.iter_batches(batch_size=block_size):
+            writer.write(batch, row_group_size=1024 * 1024)
+        writer.close()
+
+    src = pq.ParquetFile(src_path)
+    dst = pq.ParquetFile(dest_path)
+    src_metadata = src.metadata
+    dst_metadata = dst.metadata
+
+    assert src_metadata.num_rows == dst_metadata.num_rows
+    assert (
+        src_metadata.schema.to_arrow_schema() == dst_metadata.schema.to_arrow_schema()
+    )
 
 
 def rewrite_to_jsonlines(src, dest, **kwargs):
@@ -366,10 +390,25 @@ def revisions(files, target_dir):
 
 @cli.command()
 @click.argument("directory", type=click.Path(exists=True, file_okay=False))
+@click.option("--with-json", is_flag=True, help="Also calculate JSONLines stats")
 @click.option("--skip-rewrite", is_flag=True, help="Skip file rewriting")
 @click.option("--skip-json-rewrite", is_flag=True, help="Skip JSON rewrite")
 @click.option("--skip-parquet-rewrite", is_flag=True, help="Skip Parquet rewrite")
-def stats(directory, skip_rewrite, skip_json_rewrite, skip_parquet_rewrite):
+@click.option(
+    "--max-processes",
+    "-p",
+    default=None,
+    type=int,
+    help="Maximum number of processes to use",
+)
+def stats(
+    directory,
+    with_json,
+    skip_rewrite,
+    skip_json_rewrite,
+    skip_parquet_rewrite,
+    max_processes,
+):
     # go over all the parquet files in the directory, read them, generate a cdc
     # enabled version and compare the deduplication ratios of all the files
     # written without and with CDC
@@ -382,19 +421,20 @@ def stats(directory, skip_rewrite, skip_json_rewrite, skip_parquet_rewrite):
         path.with_name(path.stem + "-snappy-cdc.parquet") for path in files
     ]
 
-    print("Writing JSONLines files")
-    if not (skip_rewrite or skip_json_rewrite):
+    if with_json and not (skip_rewrite or skip_json_rewrite):
+        print("Writing JSONLines files")
         process_map(rewrite_to_jsonlines, files, json_files)
 
-    print("Writing CDC Parquet files")
     # TODO(kszucs): measure with max_data_page_size = 100 * 1024 * 1024
     if not (skip_rewrite or skip_parquet_rewrite):
+        print("Writing CDC Parquet files")
         process_map(
             functools.partial(
                 rewrite_to_parquet, compression="zstd", content_defined_chunking=True
             ),
             files,
             cdc_zstd_files,
+            max_workers=max_processes,
         )
         process_map(
             functools.partial(
@@ -402,14 +442,19 @@ def stats(directory, skip_rewrite, skip_json_rewrite, skip_parquet_rewrite):
             ),
             files,
             cdc_snappy_files,
+            max_workers=max_processes,
         )
 
-    
-    titles = ["JSONLines", "Parquet", "CDC Snappy", "CDC ZSTD"]
     column_titles = ["Total Bytes", "Chunk Bytes", "Compressed Chunk Bytes"]
+    if with_json:
+        stats = [json_files, files, cdc_snappy_files, cdc_zstd_files]
+        titles = ["JSONLines", "Parquet", "CDC Snappy", "CDC ZSTD"]
+    else:
+        stats = [files, cdc_snappy_files, cdc_zstd_files]
+        titles = ["Parquet", "CDC Snappy", "CDC ZSTD"]
 
     results = []
-    for i, paths in enumerate([json_files, files, cdc_snappy_files, cdc_zstd_files]):
+    for i, paths in enumerate(stats):
         title = titles[i]
         print(f"Estimating deduplication for {title}")
         results.append({"title": title, **de.estimate(paths)})
@@ -419,7 +464,11 @@ def stats(directory, skip_rewrite, skip_json_rewrite, skip_parquet_rewrite):
     y_keys = ["total_len", "chunk_bytes", "compressed_chunk_bytes"]
     fig = go.Figure(
         data=[
-            go.Bar(name=results[i]["title"], x=column_titles, y=[results[i][k] for k in y_keys])
+            go.Bar(
+                name=results[i]["title"],
+                x=column_titles,
+                y=[results[i][k] for k in y_keys],
+            )
             for i in range(len(results))
         ]
     )
@@ -440,8 +489,4 @@ def render_readme(template):
 
     readme = Path(template)
     content = Template(readme.read_text()).render()
-    readme.with_suffix('').write_text(content)
-
-    
-
-
+    readme.with_suffix("").write_text(content)

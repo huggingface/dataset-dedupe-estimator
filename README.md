@@ -9,25 +9,41 @@ using a CDC based content addressable storage system.
 This tool is primarily designed to evaluate the deduplication
 effectiveness of a content defined chunking feature in Apache Parquet.
 
-[Apache Parquet](https://parquet.apache.org/) is a columnar storage format that
-is widely used in the data engineering community. It is a binary file format that
-stores data in a columnar fashion, which allows for efficient reads and writes.
+Content Defined Chunking (CDC) is a technique used to divide data into
+variable-sized chunks based on the content of the data itself, rather
+than fixed-size boundaries. This method is particularly effective for
+deduplication because it ensures that identical data segments are
+consistently chunked in the same way, even if their positions within
+the dataset change. By using CDC, systems can more accurately identify
+and eliminate duplicate data, leading to significant storage savings.
+
+[Apache Parquet](https://parquet.apache.org/) is a columnar storage format
+that is widely used in the data engineering community. It is a binary file
+format that stores data in a columnar fashion, which allows for efficient
+reads and writes. In the context of Apache Parquet, CDC can enhance the
+efficiency of data storage and retrieval by creating chunks that are robust
+to data modifications such as updates, inserts, and deletes.
+
 
 # Arrow C++ / PyArrow Implementation
 
-The implementation hasn't been merged upstream yet, it is available under
-the https://github.com/kszucs/arrow/tree/content-defined-chunking branch.
+The implementation has not yet been merged upstream and is currently
+available on the following branch: [content-defined-chunking](https://github.com/kszucs/arrow/tree/content-defined-chunking).
 
-The implementation maintains a gearhash based chunker for each leaf
-column (in the ColumnWriter objects) which are persisent withing the
-parquet file writer. As new Arrow Arrays are appended to the column
-writers, the record shredded arrays `(def_levels, rep_levels, leaf_array)` 
-are being fed into the chunker which identifies the chunk boundaries.
+This implementation introduces a gearhash-based chunker for each leaf column
+within the `ColumnWriter` objects, which persist throughout the lifecycle of
+the Parquet file writer. As new Arrow Arrays are appended to the column
+writers, the record-shredded arrays `(def_levels, rep_levels, leaf_array)`
+are processed by the chunker to identify chunk boundaries.
 
-This means that the pages are not going to be split one a page's size
-reaches the default page size limit (1MB) but rather when the chunker
-identifies a chunk boundary. The resulting chunks are going to have 
-uneven sizes, but going to be robust to data updates/inserts/deletes.
+Unlike the traditional approach where pages are split once a page's size
+reaches the default limit (typically 1MB), this implementation splits pages
+based on the chunk boundaries identified by the chunker. Consequently, the
+resulting chunks will have variable sizes but will be more resilient to data
+modifications such as updates, inserts, and deletes. This method enhances the
+robustness and efficiency of data storage and retrieval in Apache Parquet by
+ensuring that identical data segments are consistently chunked in the same
+manner, regardless of their position within the dataset.
 
 # Quick Start
 
@@ -69,16 +85,16 @@ Checking out 03613ea
 Generate deduplication statistics for a directory of parquet files:
 
 ```bash
-❯ de stats /tmp/datasets                                                        
-Writing JSONLines files                                                          
+❯ de stats --with-json /tmp/datasets
+Writing JSONLines files
 100%|██████████████████████████████████████████| 194/194 [01:22<00:00,  2.36it/s]
-Writing CDC Parquet files                                                        
+Writing CDC Parquet files
 100%|██████████████████████████████████████████| 194/194 [00:19<00:00,  9.91it/s]
 100%|██████████████████████████████████████████| 194/194 [00:16<00:00, 11.91it/s]
-Estimating deduplication for JSONLines                                           
-Estimating deduplication for Parquet                                             
-Estimating deduplication for CDC Snappy                                          
-Estimating deduplication for CDC ZSTD                                            
+Estimating deduplication for JSONLines
+Estimating deduplication for Parquet
+Estimating deduplication for CDC Snappy
+Estimating deduplication for CDC ZSTD
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
 ┃            ┃            ┃            ┃             ┃             ┃ Compressed ┃
 ┃            ┃            ┃            ┃  Compressed ┃ Deduplicat… ┃ Deduplica… ┃
@@ -499,21 +515,35 @@ The experiment can be reproduced by running the following command:
 
 
 
-## Spaces
+## Datasets Results: cfahlgren1/hub-stats/spaces.parquet
 
 https://huggingface.co/datasets/cfahlgren1/hub-stats/blob/main/spaces.parquet
 
+Checkout all revisions of spaces.parquet:
+
 ```bash
-❯ de stats /tmp/spaces                                                          
-Writing JSONLines files                                                          
+❯ GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/cfahlgren1/hub-stats.git ~/Datasets/hub-stats
+❯ de revisions -d /tmp/spaces ~/Datasets/hub-stats/spaces.parquet
+```
+
+This will take some time depending on the network speed. Then the evaluation
+which automatically:
+1. Converts the parquet files to JSONLines
+2. Converts the parquet files to CDC Parquet with Snappy and ZSTD compressions
+3. Estimates the deduplication ratio for each format
+4. Prints the results and generates a plot for comparison
+
+```bash
+❯ de stats --with-json /tmp/spaces
+Writing JSONLines files
 100%|██████████████████████████████████████████| 193/193 [07:14<00:00,  2.25s/it]
-Writing CDC Parquet files                                                        
+Writing CDC Parquet files
 100%|██████████████████████████████████████████| 193/193 [00:38<00:00,  4.97it/s]
 100%|██████████████████████████████████████████| 193/193 [00:31<00:00,  6.12it/s]
-Estimating deduplication for JSONLines                                           
-Estimating deduplication for Parquet                                             
-Estimating deduplication for CDC Snappy                                          
-Estimating deduplication for CDC ZSTD                                            
+Estimating deduplication for JSONLines
+Estimating deduplication for Parquet
+Estimating deduplication for CDC Snappy
+Estimating deduplication for CDC ZSTD
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
 ┃            ┃            ┃            ┃             ┃             ┃ Compressed ┃
 ┃            ┃            ┃            ┃  Compressed ┃ Deduplicat… ┃ Deduplica… ┃
@@ -527,3 +557,40 @@ Estimating deduplication for CDC ZSTD
 ```
 
 ![Spaces Deduplication Statistics](images/spaces.png)
+
+## Datasets Results: openfoodfacts/product-database/food.parquet
+
+```bash
+❯ GIT_LFS_SKIP_SMUDGE=1 git clone https://huggingface.co/datasets/openfoodfacts/product-database.git ~/Datasets/product-database
+❯ de revisions -d /tmp/food ~/Datasets/product-database/food.parquet
+food.parquet has 32 revisions
+Checking out 2e19b51
+Checking out 1f84d31
+Checking out d31d108
+Checking out 9cd809c
+Checking out 41e5f38
+Checking out 9a30ddd
+...
+```
+
+Generate the stats but skip generating the JSONLines files since the compressed
+parquet files are around 6GB each so the uncompressed JSONLines files would
+require too much disk space.
+
+```bash
+❯ de stats /tmp/food 
+Estimating deduplication for Parquet
+Estimating deduplication for CDC Snappy
+Estimating deduplication for CDC ZSTD
+┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
+┃            ┃            ┃            ┃             ┃             ┃ Compressed ┃
+┃            ┃            ┃            ┃  Compressed ┃ Deduplicat… ┃ Deduplica… ┃
+┃ Title      ┃ Total Size ┃ Chunk Size ┃  Chunk Size ┃       Ratio ┃      Ratio ┃
+┡━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
+│ Parquet    │  182.6 GiB │  148.0 GiB │   140.5 GiB │         81% │        77% │
+│ CDC Snappy │  178.3 GiB │   75.5 GiB │    73.0 GiB │         42% │        41% │
+│ CDC ZSTD   │  109.6 GiB │   55.9 GiB │    55.6 GiB │         51% │        51% │
+└────────────┴────────────┴────────────┴─────────────┴─────────────┴────────────┘
+```
+
+![Food Deduplication Statistics](images/food.png)
