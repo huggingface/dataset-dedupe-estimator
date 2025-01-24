@@ -1,26 +1,29 @@
-# Dedupe Estimator
+# Parquet Dedupe Estimator
 
 This estimates the amount of chunk level dedupe available in a
-collection of files. All files will be chunked together
+collection of parquet files. All files will be chunked together
 so if there are multiple versions of the file, all versions
 should be provided together to see how much can be saved
-using Hugging Face's dedupped storage architecture.
+using a CDC based content addressable storage system.
 
-The chunking algorithm used here is **not** the same
-as the one being deployed. Notably, for simplicity this does not
-even use a secure hash method for chunk hashes and just uses
-std::hash. This means that collisions are plausible and
-exact numbers may actually vary from run to run.
-But it should provide a reasonable estimate.
+This tool is primarily designed to evaluate the deduplication
+effectiveness of a content defined chunking feature in Apache Arrow.
 
-UNDER CONSTRUCTION: note that this repository contains a quickly
-written python binding to https://github.com/huggingface/dedupe_estimator
-in order to evaluate deduplication efifciency for parquet files.
-
-# PyArrow Implementation
+# Arrow C++ / PyArrow Implementation
 
 The implementation hasn't been merged upstream yet, it is available under
 the https://github.com/kszucs/arrow/tree/content-defined-chunking branch.
+
+The implementation maintains a gearhash based chunker for each leaf
+column (in the ColumnWriter objects) which are persisent withing the
+parquet file writer. As new Arrow Arrays are appended to the column
+writers, the record shredded arrays `(def_levels, rep_levels, leaf_array)` 
+are being fed into the chunker which identifies the chunk boundaries.
+
+This means that the pages are not going to be split one a page's size
+reaches the default page size limit (1MB) but rather when the chunker
+identifies a chunk boundary. The resulting chunks are going to have 
+uneven sizes, but going to be robust to data updates/inserts/deletes.
 
 # Quick Start
 
