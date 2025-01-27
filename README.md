@@ -86,11 +86,10 @@ Generate deduplication statistics for a directory of parquet files:
 
 ```bash
 ❯ de stats --with-json /tmp/datasets
-Writing JSONLines files
-100%|██████████████████████████████████████████| 194/194 [01:22<00:00,  2.36it/s]
+100%|██████████████████████████████████████████| 194/194 [01:18<00:00,  2.46it/s]
 Writing CDC Parquet files
-100%|██████████████████████████████████████████| 194/194 [00:19<00:00,  9.91it/s]
-100%|██████████████████████████████████████████| 194/194 [00:16<00:00, 11.91it/s]
+100%|██████████████████████████████████████████| 194/194 [00:12<00:00, 16.01it/s]
+100%|██████████████████████████████████████████| 194/194 [00:09<00:00, 19.48it/s]
 Estimating deduplication for JSONLines
 Estimating deduplication for Parquet
 Estimating deduplication for CDC Snappy
@@ -102,8 +101,8 @@ Estimating deduplication for CDC ZSTD
 ┡━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
 │ JSONLines  │   93.0 GiB │   64.9 GiB │    12.4 GiB │         70% │        13% │
 │ Parquet    │   16.2 GiB │   15.0 GiB │    13.4 GiB │         93% │        83% │
-│ CDC Snappy │   16.2 GiB │    8.2 GiB │     7.8 GiB │         51% │        48% │
-│ CDC ZSTD   │    8.9 GiB │    5.5 GiB │     5.5 GiB │         62% │        62% │
+│ CDC Snappy │   16.2 GiB │    8.3 GiB │     7.9 GiB │         51% │        48% │
+│ CDC ZSTD   │    8.9 GiB │    5.5 GiB │     5.5 GiB │         61% │        61% │
 └────────────┴────────────┴────────────┴─────────────┴─────────────┴────────────┘
 ```
 
@@ -578,7 +577,10 @@ parquet files are around 6GB each so the uncompressed JSONLines files would
 require too much disk space.
 
 ```bash
-❯ de stats /tmp/food 
+❯ de stats /tmp/food --max-processes 8
+Writing CDC Parquet files
+100%|████████████████████████████████████████████| 32/32 [07:17<00:00, 13.67s/it]
+100%|████████████████████████████████████████████| 32/32 [06:48<00:00, 12.77s/it]
 Estimating deduplication for Parquet
 Estimating deduplication for CDC Snappy
 Estimating deduplication for CDC ZSTD
@@ -588,8 +590,8 @@ Estimating deduplication for CDC ZSTD
 ┃ Title      ┃ Total Size ┃ Chunk Size ┃  Chunk Size ┃       Ratio ┃      Ratio ┃
 ┡━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
 │ Parquet    │  182.6 GiB │  148.0 GiB │   140.5 GiB │         81% │        77% │
-│ CDC Snappy │  178.3 GiB │   75.5 GiB │    73.0 GiB │         42% │        41% │
-│ CDC ZSTD   │  109.6 GiB │   55.9 GiB │    55.6 GiB │         51% │        51% │
+│ CDC Snappy │  178.3 GiB │   75.6 GiB │    73.1 GiB │         42% │        41% │
+│ CDC ZSTD   │  109.6 GiB │   55.9 GiB │    55.5 GiB │         51% │        51% │
 └────────────┴────────────┴────────────┴─────────────┴─────────────┴────────────┘
 ```
 
