@@ -502,3 +502,49 @@ def render_readme(template):
     content = Template(readme.read_text()).render()
     readme.with_suffix("").write_text(content)
 
+
+def get_page_chunk_sizes(paths):
+    # get the result of parquet-layout command
+    for path in paths:
+        output = subprocess.check_output(["parquet-layout", path], text=True)
+        meta = json.loads(output)
+        for row_group in meta["row_groups"]:
+            for column in row_group["columns"]:
+                for page in column["pages"]:
+                    if page["page_type"].startswith("data"):
+                        yield page["uncompressed_bytes"], page["num_values"]
+
+
+@cli.command()
+@click.argument("patterns", nargs=-1, type=str)
+def page_chunks(patterns):
+    paths = []
+    for pattern in patterns:
+        if '*' in pattern:
+            paths.extend(Path().rglob(pattern))
+        else:
+            paths.append(Path(pattern))
+    
+    uncompressed_bytes, num_values = zip(*get_page_chunk_sizes(paths))
+    
+    fig = go.Figure()
+
+    fig.add_trace(
+        go.Histogram(
+            x=uncompressed_bytes,
+            nbinsx=50,
+            name="Uncompressed Page Sizes",
+            marker_color="blue",
+            opacity=0.75,
+        )
+    )
+
+    fig.update_layout(
+        title="Distribution of Uncompressed Page Sizes",
+        xaxis_title="Value",
+        yaxis_title="Frequency",
+        barmode="overlay",
+    )
+
+    fig.update_xaxes(tickformat=".2s")
+    fig.show()
