@@ -327,6 +327,17 @@ def cli():
 )
 @click.option("--use-dictionary", is_flag=True, help="Use parquet dictionary encoding")
 def synthetic(schema, size, num_edits, target_dir, use_dictionary):
+    """Generate synthetic data and compare the deduplication ratios.
+    de synthetic -s 1 -e 1 '{"a": "int"}'
+    de synthetic -s 1 -e 2 '{"a": "int"}'
+    de synthetic -s 4 -e 1 '{"a": "int"}'
+    de synthetic -s 4 -e 2 '{"a": "int"}'
+    de synthetic -s 1 -e 1 '{"a": "int", "b": "str", "c": ["int"]}'
+    de synthetic -s 1 -e 2 '{"a": "int", "b": "str", "c": ["int"]}'
+    de synthetic -s 4 -e 1 '{"a": "int", "b": "str", "c": ["int"]}'
+    de synthetic -s 4 -e 2 '{"a": "int", "b": "str", "c": ["int"]}'
+    de render-readme README.md.jinja2
+    """
     directory = Path(target_dir)
     directory.mkdir(exist_ok=True)
 
