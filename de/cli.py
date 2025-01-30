@@ -89,7 +89,7 @@ def delete_rows(table, alter_points, n=10):
             pieces.append(table.slice(start_idx, end_idx - start_idx))
         else:
             pieces.append(table.slice(start_idx, end_idx - start_idx - n))
-    return pa.concat_tables(pieces)
+    return pa.concat_tables(pieces).combine_chunks()
 
 
 def insert_rows(table, schema, alter_points, n=10):
@@ -100,12 +100,12 @@ def insert_rows(table, schema, alter_points, n=10):
         pieces.append(table.slice(start_idx, end_idx - start_idx))
         if end != 1:
             pieces.append(generate_table(schema, n))
-    return pa.concat_tables(pieces)
+    return pa.concat_tables(pieces).combine_chunks()
 
 
 def append_rows(table, schema, ratio):
     new_part = generate_table(schema, int(ratio * len(table)))
-    return pa.concat_tables([table, new_part])
+    return pa.concat_tables([table, new_part]).combine_chunks()
 
 
 def update_rows(table, schema, alter_points, columns):
@@ -490,3 +490,4 @@ def render_readme(template):
     readme = Path(template)
     content = Template(readme.read_text()).render()
     readme.with_suffix("").write_text(content)
+
