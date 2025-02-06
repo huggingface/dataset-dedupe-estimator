@@ -405,6 +405,7 @@ def revisions(files, target_dir):
 @click.option("--skip-rewrite", is_flag=True, help="Skip file rewriting")
 @click.option("--skip-json-rewrite", is_flag=True, help="Skip JSON rewrite")
 @click.option("--skip-parquet-rewrite", is_flag=True, help="Skip Parquet rewrite")
+@click.option("--disable-dictionary", is_flag=True, help="Use parquet dictionary encoding")
 @click.option(
     "--max-processes",
     "-p",
@@ -418,6 +419,7 @@ def stats(
     skip_rewrite,
     skip_json_rewrite,
     skip_parquet_rewrite,
+    disable_dictionary,
     max_processes,
 ):
     # go over all the parquet files in the directory, read them, generate a cdc
@@ -441,7 +443,7 @@ def stats(
         print("Writing CDC Parquet files")
         process_map(
             functools.partial(
-                rewrite_to_parquet, compression="zstd", content_defined_chunking=True
+                rewrite_to_parquet, compression="zstd", content_defined_chunking=True, use_dictionary=not disable_dictionary
             ),
             files,
             cdc_zstd_files,
@@ -449,7 +451,7 @@ def stats(
         )
         process_map(
             functools.partial(
-                rewrite_to_parquet, compression="snappy", content_defined_chunking=True
+                rewrite_to_parquet, compression="snappy", content_defined_chunking=True, use_dictionary=not disable_dictionary
             ),
             files,
             cdc_snappy_files,
@@ -527,12 +529,13 @@ def page_chunks(patterns):
     
     uncompressed_bytes, num_values = zip(*get_page_chunk_sizes(paths))
     
+
     fig = go.Figure()
 
     fig.add_trace(
         go.Histogram(
             x=uncompressed_bytes,
-            nbinsx=50,
+            nbinsx=100,
             name="Uncompressed Page Sizes",
             marker_color="blue",
             opacity=0.75,
