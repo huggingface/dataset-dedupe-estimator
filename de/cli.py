@@ -31,9 +31,7 @@ def pyarrow_has_cdc():
         temp_dir = Path(temp_dir)
         table = pa.table({"a": [1, 2, 3, 4, 5]})
         try:
-            pq.write_table(
-                table, temp_dir / "test.parquet", content_defined_chunking=True
-            )
+            pq.write_table(table, temp_dir / "test.parquet", cdc=True)
         except TypeError:
             return False
     return True
@@ -77,7 +75,9 @@ def generate_data(dtype, num_samples=1000):
 
 def generate_table(schema, num_samples=1000):
     data = generate_data(schema, num_samples)
-    return pa.Table.from_struct_array(pa.array(data))
+    arr = pa.array(data)
+    table = pa.Table.from_struct_array(arr)
+    return table
 
 
 def delete_rows(table, alter_points, n=10):
@@ -118,7 +118,6 @@ def update_rows(table, schema, alter_points, columns):
 
 
 def write_parquet(path, table, **kwargs):
-    # cdc = (0xffff00000000000, 1024 * 1024 / 4, 2 * 1024 * 1024)
     pq.write_table(table, path, **kwargs)
     readback = pq.read_table(path)
     assert table.equals(readback)
@@ -358,7 +357,7 @@ def synthetic(schema, size, num_edits, target_dir, use_dictionary):
         tables,
         prefix=prefix,
         postfix="nocdc",
-        content_defined_chunking=False,
+        cdc=False,
         use_dictionary=use_dictionary,
     )
     results += write_and_compare_parquet(
@@ -367,7 +366,7 @@ def synthetic(schema, size, num_edits, target_dir, use_dictionary):
         tables,
         prefix=prefix,
         postfix="cdc",
-        content_defined_chunking=True,
+        cdc=True,
         use_dictionary=use_dictionary,
         data_page_size=100 * 1024 * 1024,
     )
@@ -405,7 +404,16 @@ def revisions(files, target_dir):
 @click.option("--skip-rewrite", is_flag=True, help="Skip file rewriting")
 @click.option("--skip-json-rewrite", is_flag=True, help="Skip JSON rewrite")
 @click.option("--skip-parquet-rewrite", is_flag=True, help="Skip Parquet rewrite")
-@click.option("--disable-dictionary", is_flag=True, help="Use parquet dictionary encoding")
+@click.option(
+    "--disable-dictionary", is_flag=True, help="Disallow parquet dictionary encoding"
+)
+@click.option(
+    "--cdc-min-size", default=256, help="Minimum CDC chunk size in KiB", type=int
+)
+@click.option(
+    "--cdc-max-size", default=1024, help="Maximum CDC chunk size in KiB", type=int
+)
+@click.option("--cdc-norm-factor", default=0, help="CDC normalization factor", type=int)
 @click.option(
     "--max-processes",
     "-p",
@@ -420,6 +428,9 @@ def stats(
     skip_json_rewrite,
     skip_parquet_rewrite,
     disable_dictionary,
+    cdc_min_size,
+    cdc_max_size,
+    cdc_norm_factor,
     max_processes,
 ):
     # go over all the parquet files in the directory, read them, generate a cdc
@@ -438,21 +449,24 @@ def stats(
         print("Writing JSONLines files")
         process_map(rewrite_to_jsonlines, files, json_files)
 
+    kwargs = {
+        "cdc_size_range": (cdc_min_size * 1024, cdc_max_size * 1024),
+        "cdc_norm_factor": cdc_norm_factor,
+        "cdc": True,
+        "use_dictionary": not disable_dictionary,
+        "data_page_size": 100 * 1024 * 1024,
+    }
     # TODO(kszucs): measure with max_data_page_size = 100 * 1024 * 1024
     if not (skip_rewrite or skip_parquet_rewrite):
         print("Writing CDC Parquet files")
         process_map(
-            functools.partial(
-                rewrite_to_parquet, compression="zstd", content_defined_chunking=True, use_dictionary=not disable_dictionary
-            ),
+            functools.partial(rewrite_to_parquet, compression="zstd", **kwargs),
             files,
             cdc_zstd_files,
             max_workers=max_processes,
         )
         process_map(
-            functools.partial(
-                rewrite_to_parquet, compression="snappy", content_defined_chunking=True, use_dictionary=not disable_dictionary
-            ),
+            functools.partial(rewrite_to_parquet, compression="snappy", **kwargs),
             files,
             cdc_snappy_files,
             max_workers=max_processes,
@@ -495,6 +509,15 @@ def dedup(files):
 
 
 @cli.command()
+@click.argument("files", nargs=-1, type=click.Path(exists=True))
+def rewrite(files):
+    for path in files:
+        path = Path(path)
+        out = path.with_name(path.stem + "-dedup.parquet")
+        rewrite_to_parquet(path, out, cdc=True)
+
+
+@cli.command()
 @click.argument("template", type=click.Path(exists=True))
 def render_readme(template):
     # open the README file and render it using jinja2
@@ -522,13 +545,12 @@ def get_page_chunk_sizes(paths):
 def page_chunks(patterns):
     paths = []
     for pattern in patterns:
-        if '*' in pattern:
+        if "*" in pattern:
             paths.extend(Path().rglob(pattern))
         else:
             paths.append(Path(pattern))
-    
+
     uncompressed_bytes, num_values = zip(*get_page_chunk_sizes(paths))
-    
 
     fig = go.Figure()
 
