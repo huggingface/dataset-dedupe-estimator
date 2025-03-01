@@ -1,7 +1,7 @@
 import json
-import subprocess
+
 import functools
-import os
+
 from pathlib import Path
 import sys
 import tempfile
@@ -10,19 +10,26 @@ import click
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
-from faker import Faker
 from tqdm.contrib.concurrent import process_map
 from rich.console import Console
 from rich.table import Table
 import humanize
 import plotly.graph_objects as go
-from PIL import Image
 
-import de
 
-seed = 42
-fake = Faker()
-fake.random.seed(seed)
+from .estimate import estimate_de, estimate_xtool
+from .fileutils import (
+    rewrite_to_parquet,
+    rewrite_to_jsonlines,
+    checkout_file_revisions,
+    get_page_chunk_sizes,
+)
+from .synthetic import (
+    generate_alterated_tables,
+    write_and_compare_parquet,
+    write_and_compare_json,
+    convert_dedupe_images_to_png,
+)
 
 
 def pyarrow_has_cdc():
@@ -37,248 +44,6 @@ def pyarrow_has_cdc():
     return True
 
 
-def convert_dedupe_images_to_png(directory):
-    directory = Path(directory)
-
-    for ppm in directory.iterdir():
-        if ppm.suffix == ".ppm":
-            png = ppm.with_suffix(".png")
-            with Image.open(ppm) as img:
-                img.save(png, "PNG")
-            ppm.unlink()
-
-
-def generate_data(dtype, num_samples=1000):
-    if dtype in ("int", int):
-        return np.random.randint(0, 1_000_000, size=num_samples).tolist()
-    elif dtype in ("float", float):
-        return np.random.uniform(0, 1_000_000, size=num_samples).round(3).tolist()
-    elif dtype in ("str", str):
-        return [fake.word() for _ in range(num_samples)]
-    elif dtype == ("bool", bool):
-        return np.random.choice([True, False], size=num_samples).tolist()
-    elif isinstance(dtype, dict):
-        columns = [
-            generate_data(field_type, num_samples) for field_type in dtype.values()
-        ]
-        return [dict(zip(dtype.keys(), row)) for row in zip(*columns)]
-    elif isinstance(dtype, list) and dtype:
-        lengths = np.random.randint(0, 5, size=num_samples)
-        values = generate_data(dtype[0], lengths.sum())
-        return [
-            values[i : i + length]
-            for i, length in zip(np.cumsum([0] + lengths), lengths)
-        ]
-    else:
-        raise ValueError("Unsupported data type: {}".format(dtype))
-
-
-def generate_table(schema, num_samples=1000):
-    data = generate_data(schema, num_samples)
-    arr = pa.array(data)
-    table = pa.Table.from_struct_array(arr)
-    return table
-
-
-def delete_rows(table, alter_points, n=10):
-    pieces = []
-    for start, end in zip([0] + alter_points, alter_points + [1]):
-        start_idx = int(start * len(table))
-        end_idx = int(end * len(table))
-        if end == 1:
-            pieces.append(table.slice(start_idx, end_idx - start_idx))
-        else:
-            pieces.append(table.slice(start_idx, end_idx - start_idx - n))
-    return pa.concat_tables(pieces).combine_chunks()
-
-
-def insert_rows(table, schema, alter_points, n=10):
-    pieces = []
-    for start, end in zip([0] + alter_points, alter_points + [1]):
-        start_idx = int(start * len(table))
-        end_idx = int(end * len(table))
-        pieces.append(table.slice(start_idx, end_idx - start_idx))
-        if end != 1:
-            pieces.append(generate_table(schema, n))
-    return pa.concat_tables(pieces).combine_chunks()
-
-
-def append_rows(table, schema, ratio):
-    new_part = generate_table(schema, int(ratio * len(table)))
-    return pa.concat_tables([table, new_part]).combine_chunks()
-
-
-def update_rows(table, schema, alter_points, columns):
-    df = table.to_pandas()
-    for place in alter_points:
-        idx = int(place * len(df))
-        for column in columns:
-            df.at[idx, column] = generate_data(schema[column], 1)[0]
-    return pa.Table.from_pandas(df)
-
-
-def write_parquet(path, table, **kwargs):
-    pq.write_table(table, path, **kwargs)
-    readback = pq.read_table(path)
-    assert table.equals(readback)
-
-
-def rewrite_to_parquet(src_path, dest_path, block_size=1024 * 1024, **kwargs):
-    """
-    Reads a Parquet file in blocks and writes them out to another file.
-
-    :param src_path: Path to the source Parquet file.
-    :param dest_path: Path to the destination Parquet file.
-    :param block_size: Size of the blocks to read and write in bytes.
-    """
-    src_path = Path(src_path)
-    dest_path = Path(dest_path)
-
-    with pq.ParquetFile(src_path) as src:
-        schema = src.schema.to_arrow_schema()
-        writer = pq.ParquetWriter(dest_path, schema, **kwargs)
-        for batch in src.iter_batches(batch_size=block_size):
-            writer.write(batch, row_group_size=1024 * 1024)
-        writer.close()
-
-    src = pq.ParquetFile(src_path)
-    dst = pq.ParquetFile(dest_path)
-    src_metadata = src.metadata
-    dst_metadata = dst.metadata
-
-    assert src_metadata.num_rows == dst_metadata.num_rows
-    assert (
-        src_metadata.schema.to_arrow_schema() == dst_metadata.schema.to_arrow_schema()
-    )
-
-
-def rewrite_to_jsonlines(src, dest, **kwargs):
-    table = pq.read_table(src)
-    table.to_pandas().to_json(dest, orient="records", lines=True, **kwargs)
-
-
-def generate_alterated_tables(
-    schema, size, alter_points=(0.5,), append_ratio=0.05, update_columns=None
-):
-    n = 10
-    fields = list(schema.keys())
-    table = generate_table(schema, size)
-    deleted = delete_rows(table, alter_points, n=n)
-    inserted = insert_rows(table, schema, alter_points, n=n)
-    appended = append_rows(table, schema, append_ratio)
-    updated = update_rows(table, schema, alter_points, columns=fields)
-    assert len(table) == size
-    assert len(updated) == size
-    assert len(deleted) == size - n * len(alter_points)
-    assert len(inserted) == size + n * len(alter_points)
-
-    result = {
-        "deleted": deleted,
-        "inserted": inserted,
-        "appended": appended,
-        "updated": updated,
-    }
-    for key, fields in (update_columns or {}).items():
-        result[f"updated_{key}"] = update_rows(
-            table, schema, alter_points, columns=fields
-        )
-
-    return table, result
-
-
-def write_and_compare_parquet(
-    directory, original, alts, prefix, postfix, **parquet_options
-):
-    results = []
-    for compression in ["none", "zstd", "snappy"]:
-        if compression == "none":
-            parquet_options["compression"] = None
-        else:
-            parquet_options["compression"] = compression
-        a = directory / f"{prefix}-{compression}-original-{postfix}.parquet"
-        write_parquet(a, original, **parquet_options)
-        for name, table in alts.items():
-            b = directory / f"{prefix}-{compression}-{name}-{postfix}.parquet"
-            write_parquet(b, table, **parquet_options)
-            result = de.estimate([a, b])
-            results.append(
-                {"kind": postfix, "edit": name, "compression": compression, **result}
-            )
-    return results
-
-
-def write_and_compare_json(directory, original, alts, prefix):
-    results = []
-    original_df = original.to_pandas()
-    for compression in ["none", "zstd"]:
-        comp = None if compression == "none" else compression
-        a = directory / f"{prefix}-{compression}-original.jsonlines"
-        original_df.to_json(a, orient="records", lines=True, compression=comp)
-        for name, table in alts.items():
-            b = directory / f"{prefix}-{compression}-{name}.jsonlines"
-            table.to_pandas().to_json(b, orient="records", lines=True, compression=comp)
-            result = de.estimate([a, b])
-            results.append(
-                {"kind": "json", "edit": name, "compression": compression, **result}
-            )
-    return results
-
-
-def checkout_file_revisions(file_path, target_dir) -> list[str]:
-    """
-    Returns a list of short commit hashes for all revisions of the given file.
-    """
-    file_path = Path(file_path)
-    target_dir = Path(target_dir)
-
-    cwd = Path.cwd()
-    try:
-        os.chdir(file_path.parent)
-        git_dir = Path(
-            subprocess.check_output(
-                ["git", "rev-parse", "--show-toplevel"], text=True
-            ).strip()
-        )
-    finally:
-        os.chdir(cwd)
-
-    git_file = file_path.relative_to(git_dir)
-    git_cmd = ["git", "-C", str(git_dir)]
-    try:
-        command = git_cmd + [
-            "log",
-            "--pretty=format:%h",
-            "--follow",
-            "--diff-filter=d",
-            "--",
-            str(git_file),
-        ]
-        output = subprocess.check_output(command, text=True)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to retrieve revisions for {git_file}") from e
-
-    revisions = output.strip().split("\n")
-    print(f"{git_file} has {len(revisions)} revisions")
-    for rev in revisions:
-        print("Checking out", rev)
-        command = git_cmd + [
-            f"--work-tree={target_dir}",
-            "checkout",
-            rev,
-            "--",
-            str(git_file),
-        ]
-        try:
-            subprocess.run(command, check=True)
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(
-                f"Failed to checkout {file_path} at revision {rev}"
-            ) from e
-        # rename the file to include the commit hash
-        new_file = target_dir / f"{file_path.stem}-{rev}{file_path.suffix}"
-        os.rename(target_dir / git_file, new_file)
-
-
 def pretty_print_stats(results):
     # dump the results to the console as a rich formatted table
     console = Console()
@@ -287,8 +52,9 @@ def pretty_print_stats(results):
     table.add_column("Total Size", justify="right")
     table.add_column("Chunk Size", justify="right")
     table.add_column("Compressed Chunk Size", justify="right")
-    table.add_column("Deduplication Ratio", justify="right")
-    table.add_column("Compressed Deduplication Ratio", justify="right")
+    table.add_column("Dedup Ratio", justify="right")
+    table.add_column("Compressed Dedup Ratio", justify="right")
+    table.add_column("Transmitted XTool Bytes", justify="right")
     for i, row in enumerate(results):
         table.add_row(
             row["title"],
@@ -297,6 +63,9 @@ def pretty_print_stats(results):
             humanize.naturalsize(row["compressed_chunk_bytes"], binary=True),
             "{:.0%}".format(row["chunk_bytes"] / results[i]["total_len"]),
             "{:.0%}".format(row["compressed_chunk_bytes"] / results[i]["total_len"]),
+            humanize.naturalsize(row["transmitted_xtool_bytes"], binary=True)
+            if "transmitted_xtool_bytes" in row
+            else "",
         )
     console.print(table)
 
@@ -471,8 +240,12 @@ def stats(
             cdc_snappy_files,
             max_workers=max_processes,
         )
-
-    column_titles = ["Total Bytes", "Chunk Bytes", "Compressed Chunk Bytes"]
+    column_titles = [
+        "Total Bytes",
+        "Chunk Bytes",
+        "Compressed Chunk Bytes",
+        "Transmitted XTool Bytes",
+    ]
     if with_json:
         stats = [json_files, files, cdc_snappy_files, cdc_zstd_files]
         titles = ["JSONLines", "Parquet", "CDC Snappy", "CDC ZSTD"]
@@ -484,28 +257,34 @@ def stats(
     for i, paths in enumerate(stats):
         title = titles[i]
         print(f"Estimating deduplication for {title}")
-        results.append({"title": title, **de.estimate(paths)})
+        results.append({"title": title, **estimate_de(paths), **estimate_xtool(paths)})
     pretty_print_stats(results)
 
-    # plot the results using plotly if available
-    y_keys = ["total_len", "chunk_bytes", "compressed_chunk_bytes"]
+    # plot the results using plotly with bars grouped by metric
+    y_keys = [
+        "total_len",
+        "chunk_bytes",
+        "compressed_chunk_bytes",
+        "transmitted_xtool_bytes",
+    ]
     fig = go.Figure(
         data=[
             go.Bar(
-                name=results[i]["title"],
-                x=column_titles,
-                y=[results[i][k] for k in y_keys],
+                name=column_title,
+                x=[r["title"] for r in results],
+                y=[r[y_keys[i]] for r in results],
             )
-            for i in range(len(results))
+            for i, column_title in enumerate(column_titles)
         ]
     )
+    fig.update_layout(barmode="group", yaxis=dict(tickformat=".2s", title="Bytes"))
     fig.show()
 
 
 @cli.command()
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
 def dedup(files):
-    de.estimate(files)
+    estimate_de(files)
 
 
 @cli.command()
@@ -526,18 +305,6 @@ def render_readme(template):
     readme = Path(template)
     content = Template(readme.read_text()).render()
     readme.with_suffix("").write_text(content)
-
-
-def get_page_chunk_sizes(paths):
-    # get the result of parquet-layout command
-    for path in paths:
-        output = subprocess.check_output(["parquet-layout", path], text=True)
-        meta = json.loads(output)
-        for row_group in meta["row_groups"]:
-            for column in row_group["columns"]:
-                for page in column["pages"]:
-                    if page["page_type"].startswith("data"):
-                        yield page["uncompressed_bytes"], page["num_values"]
 
 
 @cli.command()
