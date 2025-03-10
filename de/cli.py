@@ -36,7 +36,7 @@ def pyarrow_has_cdc():
     # check that pyarrow is compoiled with cdc support
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_dir = Path(temp_dir)
-        table = pa.table({"a": [1, 2, 3, 4, 5]})
+        table = pa.table({"id": [1, 2, 3, 4, 5]})
         try:
             pq.write_table(table, temp_dir / "test.parquet", cdc=True)
         except TypeError:
@@ -170,6 +170,8 @@ def revisions(files, target_dir):
 @cli.command()
 @click.argument("directory", type=click.Path(exists=True, file_okay=False))
 @click.option("--with-json", is_flag=True, help="Also calculate JSONLines stats")
+@click.option("--skip-zstd", is_flag=True, help="Skip ZSTD rewrite")
+@click.option("--skip-snappy", is_flag=True, help="Skip Snappy rewrite")
 @click.option("--skip-rewrite", is_flag=True, help="Skip file rewriting")
 @click.option("--skip-json-rewrite", is_flag=True, help="Skip JSON rewrite")
 @click.option("--skip-parquet-rewrite", is_flag=True, help="Skip Parquet rewrite")
@@ -193,6 +195,8 @@ def revisions(files, target_dir):
 def stats(
     directory,
     with_json,
+    skip_zstd,
+    skip_snappy,
     skip_rewrite,
     skip_json_rewrite,
     skip_parquet_rewrite,
@@ -226,36 +230,48 @@ def stats(
         "data_page_size": 100 * 1024 * 1024,
     }
     # TODO(kszucs): measure with max_data_page_size = 100 * 1024 * 1024
-    if not (skip_rewrite or skip_parquet_rewrite):
-        print("Writing CDC Parquet files")
-        process_map(
-            functools.partial(rewrite_to_parquet, compression="zstd", **kwargs),
-            files,
-            cdc_zstd_files,
-            max_workers=max_processes,
-        )
-        process_map(
-            functools.partial(rewrite_to_parquet, compression="snappy", **kwargs),
-            files,
-            cdc_snappy_files,
-            max_workers=max_processes,
-        )
+    if not (skip_rewrite or skip_parquet_rewrite or skip_zstd):
+        print("Writing CDC Parquet files with ZSTD compression")
+        if max_processes == 1:
+            for src_path, dst_path in zip(files, cdc_zstd_files):
+                rewrite_to_parquet(src_path, dst_path, compression="snappy", **kwargs)
+        else:
+            process_map(
+                functools.partial(rewrite_to_parquet, compression="zstd", **kwargs),
+                files,
+                cdc_zstd_files,
+                max_workers=max_processes,
+            )
+    if not (skip_rewrite or skip_parquet_rewrite or skip_snappy):
+        print("Writing CDC Parquet files with Snappy compression")
+        if max_processes == 1:
+            for src_path, dst_path in zip(files, cdc_snappy_files):
+                rewrite_to_parquet(src_path, dst_path, compression="snappy", **kwargs)
+        else:
+            process_map(
+                functools.partial(rewrite_to_parquet, compression="snappy", **kwargs),
+                files,
+                cdc_snappy_files,
+                max_workers=max_processes,
+            )
+
     column_titles = [
         "Total Bytes",
         "Chunk Bytes",
         "Compressed Chunk Bytes",
         "Transmitted XTool Bytes",
     ]
+    inputs = {}
     if with_json:
-        stats = [json_files, files, cdc_snappy_files, cdc_zstd_files]
-        titles = ["JSONLines", "Parquet", "CDC Snappy", "CDC ZSTD"]
-    else:
-        stats = [files, cdc_snappy_files, cdc_zstd_files]
-        titles = ["Parquet", "CDC Snappy", "CDC ZSTD"]
+        inputs["JSONLines"] = json_files
+    inputs["Parquet"] = files
+    if not skip_zstd:
+        inputs["CDC ZSTD"] = cdc_zstd_files
+    if not skip_snappy:
+        inputs["CDC Snappy"] = cdc_snappy_files
 
     results = []
-    for i, paths in enumerate(stats):
-        title = titles[i]
+    for title, paths in inputs.items():
         print(f"Estimating deduplication for {title}")
         results.append({"title": title, **estimate_de(paths), **estimate_xtool(paths)})
     pretty_print_stats(results)
