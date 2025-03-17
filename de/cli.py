@@ -38,7 +38,7 @@ def pyarrow_has_cdc():
         temp_dir = Path(temp_dir)
         table = pa.table({"id": [1, 2, 3, 4, 5]})
         try:
-            pq.write_table(table, temp_dir / "test.parquet", cdc=True)
+            pq.write_table(table, temp_dir / "test.parquet", use_content_defined_chunking=True)
         except TypeError:
             return False
     return True
@@ -184,6 +184,9 @@ def revisions(files, target_dir):
 @click.option(
     "--cdc-max-size", default=1024, help="Maximum CDC chunk size in KiB", type=int
 )
+@click.option(
+    "--data-page-size", default=1024 * 1024, help="Parquet data page size in bytes", type=int
+)
 @click.option("--cdc-norm-factor", default=0, help="CDC normalization factor", type=int)
 @click.option(
     "--max-processes",
@@ -204,6 +207,7 @@ def stats(
     cdc_min_size,
     cdc_max_size,
     cdc_norm_factor,
+    data_page_size,
     max_processes,
 ):
     # go over all the parquet files in the directory, read them, generate a cdc
@@ -223,13 +227,14 @@ def stats(
         process_map(rewrite_to_jsonlines, files, json_files)
 
     kwargs = {
-        "cdc_size_range": (cdc_min_size * 1024, cdc_max_size * 1024),
-        "cdc_norm_factor": cdc_norm_factor,
-        "cdc": True,
+        "use_content_defined_chunking": {
+            "min_chunk_size": cdc_min_size * 1024, 
+            "max_chunk_size": cdc_max_size * 1024, 
+            "norm_factor": cdc_norm_factor
+        },
         "use_dictionary": not disable_dictionary,
-        "data_page_size": 100 * 1024 * 1024,
+        "data_page_size": data_page_size,
     }
-    # TODO(kszucs): measure with max_data_page_size = 100 * 1024 * 1024
     if not (skip_rewrite or skip_parquet_rewrite or skip_zstd):
         print("Writing CDC Parquet files with ZSTD compression")
         if max_processes == 1:
