@@ -21,6 +21,7 @@ from .estimate import estimate_de, estimate_xtool
 from .fileutils import (
     rewrite_to_parquet,
     rewrite_to_jsonlines,
+    rewrite_to_sqlite,
     checkout_file_revisions,
     get_page_chunk_sizes,
 )
@@ -28,6 +29,7 @@ from .synthetic import (
     generate_alterated_tables,
     write_and_compare_parquet,
     write_and_compare_json,
+    write_and_compare_sqlite,
     convert_dedupe_images_to_png,
 )
 
@@ -38,7 +40,9 @@ def pyarrow_has_cdc():
         temp_dir = Path(temp_dir)
         table = pa.table({"id": [1, 2, 3, 4, 5]})
         try:
-            pq.write_table(table, temp_dir / "test.parquet", use_content_defined_chunking=True)
+            pq.write_table(
+                table, temp_dir / "test.parquet", use_content_defined_chunking=True
+            )
         except TypeError:
             return False
     return True
@@ -126,7 +130,7 @@ def synthetic(schema, size, num_edits, target_dir, use_dictionary):
         tables,
         prefix=prefix,
         postfix="nocdc",
-        cdc=False,
+        use_content_defined_chunking=False,
         use_dictionary=use_dictionary,
     )
     results += write_and_compare_parquet(
@@ -135,11 +139,12 @@ def synthetic(schema, size, num_edits, target_dir, use_dictionary):
         tables,
         prefix=prefix,
         postfix="cdc",
-        cdc=True,
+        use_content_defined_chunking=True,
         use_dictionary=use_dictionary,
-        data_page_size=100 * 1024 * 1024,
+        # data_page_size=100 * 1024 * 1024,
     )
     results += write_and_compare_json(directory, original, tables, prefix=prefix)
+    results += write_and_compare_sqlite(directory, original, tables, prefix=prefix)
     convert_dedupe_images_to_png(directory)
 
     for row in results:
@@ -170,10 +175,12 @@ def revisions(files, target_dir):
 @cli.command()
 @click.argument("directory", type=click.Path(exists=True, file_okay=False))
 @click.option("--with-json", is_flag=True, help="Also calculate JSONLines stats")
+@click.option("--with-sqlite", is_flag=True, help="Also calculate SQLite stats")
 @click.option("--skip-zstd", is_flag=True, help="Skip ZSTD rewrite")
 @click.option("--skip-snappy", is_flag=True, help="Skip Snappy rewrite")
 @click.option("--skip-rewrite", is_flag=True, help="Skip file rewriting")
 @click.option("--skip-json-rewrite", is_flag=True, help="Skip JSON rewrite")
+@click.option("--skip-sqlite-rewrite", is_flag=True, help="Skip SQLite rewrite")
 @click.option("--skip-parquet-rewrite", is_flag=True, help="Skip Parquet rewrite")
 @click.option(
     "--disable-dictionary", is_flag=True, help="Disallow parquet dictionary encoding"
@@ -185,7 +192,10 @@ def revisions(files, target_dir):
     "--cdc-max-size", default=1024, help="Maximum CDC chunk size in KiB", type=int
 )
 @click.option(
-    "--data-page-size", default=1024 * 1024, help="Parquet data page size in bytes", type=int
+    "--data-page-size",
+    default=1024 * 1024,
+    help="Parquet data page size in bytes",
+    type=int,
 )
 @click.option("--cdc-norm-factor", default=0, help="CDC normalization factor", type=int)
 @click.option(
@@ -198,10 +208,12 @@ def revisions(files, target_dir):
 def stats(
     directory,
     with_json,
+    with_sqlite,
     skip_zstd,
     skip_snappy,
     skip_rewrite,
     skip_json_rewrite,
+    skip_sqlite_rewrite,
     skip_parquet_rewrite,
     disable_dictionary,
     cdc_min_size,
@@ -217,6 +229,7 @@ def stats(
         path for path in Path(directory).rglob("*.parquet") if "cdc" not in path.name
     ]
     json_files = [path.with_name(path.stem + ".jsonlines") for path in files]
+    sqlite_files = [path.with_name(path.stem + ".sqlite") for path in files]
     cdc_zstd_files = [path.with_name(path.stem + "-zstd-cdc.parquet") for path in files]
     cdc_snappy_files = [
         path.with_name(path.stem + "-snappy-cdc.parquet") for path in files
@@ -225,12 +238,15 @@ def stats(
     if with_json and not (skip_rewrite or skip_json_rewrite):
         print("Writing JSONLines files")
         process_map(rewrite_to_jsonlines, files, json_files)
+    if with_sqlite and not (skip_rewrite or skip_sqlite_rewrite):
+        print("Writing SQLite files")
+        process_map(rewrite_to_sqlite, files, sqlite_files)
 
     kwargs = {
         "use_content_defined_chunking": {
-            "min_chunk_size": cdc_min_size * 1024, 
-            "max_chunk_size": cdc_max_size * 1024, 
-            "norm_factor": cdc_norm_factor
+            "min_chunk_size": cdc_min_size * 1024,
+            "max_chunk_size": cdc_max_size * 1024,
+            "norm_factor": cdc_norm_factor,
         },
         "use_dictionary": not disable_dictionary,
         "data_page_size": data_page_size,
@@ -269,6 +285,8 @@ def stats(
     inputs = {}
     if with_json:
         inputs["JSONLines"] = json_files
+    if with_sqlite:
+        inputs["SQLite"] = sqlite_files
     inputs["Parquet"] = files
     if not skip_zstd:
         inputs["CDC ZSTD"] = cdc_zstd_files
@@ -314,7 +332,7 @@ def rewrite(files):
     for path in files:
         path = Path(path)
         out = path.with_name(path.stem + "-dedup.parquet")
-        rewrite_to_parquet(path, out, cdc=True)
+        rewrite_to_parquet(path, out, use_content_defined_chunking=True)
 
 
 @cli.command()

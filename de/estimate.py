@@ -35,7 +35,7 @@ def estimate_xtool(paths):
         result = subprocess.run(
             cmd, check=True, capture_output=True, text=True, env=env
         )
-        
+
     # stderr looks like:
     # 'Dedupping 26 files...\nUsing lz4 compression\n\n\nClean results:\nTransmitted 3180990288 bytes in total.\n'
     transmitted = int(result.stderr.splitlines()[-1].split()[1])

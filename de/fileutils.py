@@ -40,6 +40,17 @@ def rewrite_to_jsonlines(src, dest, **kwargs):
     table.to_pandas().to_json(dest, orient="records", lines=True, **kwargs)
 
 
+def rewrite_to_sqlite(src, dest, **kwargs):
+    """
+    Reads a Parquet file and writes it out to a SQLite database.
+
+    :param src: Path to the source Parquet file.
+    :param dest: Path to the destination SQLite database.
+    """
+    table = pq.read_table(src)
+    table.to_pandas().to_sql(dest.stem, dest, if_exists="replace", **kwargs)
+
+
 def checkout_file_revisions(file_path, target_dir) -> list[str]:
     """
     Returns a list of short commit hashes for all revisions of the given file.

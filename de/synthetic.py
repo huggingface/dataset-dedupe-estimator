@@ -5,6 +5,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from faker import Faker
 from PIL import Image
+import sqlite3
 
 from .estimate import estimate_de
 
@@ -151,6 +152,25 @@ def write_and_compare_json(directory, original, alts, prefix):
             result = estimate_de([a, b])
             results.append(
                 {"kind": "json", "edit": name, "compression": compression, **result}
+            )
+    return results
+
+
+def write_and_compare_sqlite(directory, original, alts, prefix):
+    results = []
+    original_df = original.to_pandas()
+    for compression in ["none"]:
+        comp = None if compression == "none" else compression
+        a = directory / f"{prefix}-{compression}-original.sqlite"
+        con = sqlite3.connect(a)
+        original_df.to_sql("table", con, if_exists="replace", index=False)
+        for name, table in alts.items():
+            b = directory / f"{prefix}-{compression}-{name}.sqlite"
+            con = sqlite3.connect(b)
+            table.to_pandas().to_sql("table", con, if_exists="replace", index=False)
+            result = estimate_de([a, b])
+            results.append(
+                {"kind": "sqlite", "edit": name, "compression": compression, **result}
             )
     return results
 
