@@ -13,7 +13,7 @@ import pyarrow.parquet as pq
 from tqdm.contrib.concurrent import process_map
 from rich.console import Console
 from rich.table import Table
-import humanize
+from humanize import naturalsize
 import plotly.graph_objects as go
 
 
@@ -62,12 +62,12 @@ def pretty_print_stats(results):
     for i, row in enumerate(results):
         table.add_row(
             row["title"],
-            humanize.naturalsize(row["total_len"], binary=True),
-            humanize.naturalsize(row["chunk_bytes"], binary=True),
-            humanize.naturalsize(row["compressed_chunk_bytes"], binary=True),
+            naturalsize(row["total_len"], binary=True),
+            naturalsize(row["chunk_bytes"], binary=True),
+            naturalsize(row["compressed_chunk_bytes"], binary=True),
             "{:.0%}".format(row["chunk_bytes"] / results[i]["total_len"]),
             "{:.0%}".format(row["compressed_chunk_bytes"] / results[i]["total_len"]),
-            humanize.naturalsize(row["transmitted_xtool_bytes"], binary=True)
+            naturalsize(row["transmitted_xtool_bytes"], binary=True)
             if "transmitted_xtool_bytes" in row
             else "",
         )
@@ -323,7 +323,15 @@ def stats(
 @cli.command()
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
 def dedup(files):
-    estimate_de(files)
+    result_de = estimate_de(files)
+    result_xtool = estimate_xtool(files)
+    dedup_ratio = result_de["chunk_bytes"] / result_de["total_len"]
+    print(
+        f"Deduplication ratio: {dedup_ratio:.2%} ({naturalsize(result_de['chunk_bytes'])} / {naturalsize(result_de['total_len'])})"
+    )
+    print(
+        f"XTool deduplication ratio: {result_xtool['transmitted_xtool_bytes'] / result_de['total_len']:.2%} ({naturalsize(result_xtool['transmitted_xtool_bytes'])} / {naturalsize(result_de['total_len'])})"
+    )
 
 
 @cli.command()
@@ -378,4 +386,141 @@ def page_chunks(patterns):
     )
 
     fig.update_xaxes(tickformat=".2s")
+    fig.show()
+
+
+def calculate_parameter_impact(
+    path, directory, param_name, param_values, param_default
+):
+    # calculate the impact of a parameter on the deduplication ratio
+    # by rewriting the file with different values of the parameter
+    # and comparing the deduplication ratios
+    directory.mkdir(exist_ok=True)
+    table = pq.read_table(path)
+
+    default_path = directory / f"{param_name}={param_default}.parquet"
+    if not default_path.exists():
+        pq.write_table(
+            table,
+            default_path,
+            use_content_defined_chunking=True,
+            **{param_name: param_default},
+        )
+
+    files = [default_path]
+    results = {}
+    for value in param_values:
+        path = directory / f"{param_name}={value}.parquet"
+        files.append(path)
+        if not path.exists():
+            pq.write_table(
+                table,
+                path,
+                use_content_defined_chunking=True,
+                **{param_name: value},
+            )
+
+        de_result = estimate_de([default_path, path])
+        xtool_result = estimate_xtool([default_path, path])
+
+        result = {
+            "total_len": de_result["total_len"],
+            "chunk_bytes": de_result["chunk_bytes"],
+            "compressed_chunk_bytes": de_result["compressed_chunk_bytes"],
+            "transmitted_xtool_bytes": xtool_result["transmitted_xtool_bytes"],
+            "dedup_ratio": de_result["chunk_bytes"] / de_result["total_len"],
+            "xtool_dedup_ratio": (
+                xtool_result["transmitted_xtool_bytes"] / de_result["total_len"]
+            ),
+        }
+        results[value] = result
+
+    overall_de_result = estimate_de(files)
+    overall_xtool_result = estimate_xtool(files)
+    overall_result = {
+        "total_len": overall_de_result["total_len"],
+        "chunk_bytes": overall_de_result["chunk_bytes"],
+        "compressed_chunk_bytes": overall_de_result["compressed_chunk_bytes"],
+        "transmitted_xtool_bytes": overall_xtool_result["transmitted_xtool_bytes"],
+        "dedup_ratio": overall_de_result["chunk_bytes"]
+        / overall_de_result["total_len"],
+        "xtool_dedup_ratio": (
+            overall_xtool_result["transmitted_xtool_bytes"]
+            / overall_de_result["total_len"]
+        ),
+    }
+
+    return results, overall_result
+
+
+@cli.command
+@click.argument("file", type=Path)
+@click.argument("directory", type=Path)
+@click.option(
+    "--row-group-size",
+    is_flag=True,
+    help="Calculate the impact of row group size on deduplication ratio",
+)
+@click.option(
+    "--data-page-size",
+    is_flag=True,
+    help="Calculate the impact of max page size on deduplication ratio",
+)
+def param_impact(file, directory, row_group_size, data_page_size):
+    Mi = 1024 * 1024
+    if row_group_size:
+        param_name = "row_group_size"
+        param_default = 2**20
+        param_values = [2**i for i in range(10, 22)]
+    elif data_page_size:
+        param_name = "data_page_size"
+        param_default = 2**20
+        param_values = [2**i for i in range(15, 23)]
+    else:
+        print("Please specify either --row-group-size or --max-page-size")
+        sys.exit(1)
+
+    results, overall_result = calculate_parameter_impact(
+        file, directory, param_name, param_values, param_default
+    )
+
+    for param_value, result in results.items():
+        print(
+            f"{param_name}: {param_value}\n"
+            f"Deduplication ratio: {result['dedup_ratio']:.2%} ({naturalsize(result['chunk_bytes'])} / {naturalsize(result['total_len'])})\n"
+            f"XTool deduplication ratio: {result['xtool_dedup_ratio']:.2%} ({naturalsize(result['transmitted_xtool_bytes'])} / {naturalsize(result['total_len'])})\n"
+        )
+
+    print(f"Overall deduplication ratio over {len(results)} files:")
+    print(
+        f"Overall deduplication ratio: {overall_result['dedup_ratio']:.2%} ({naturalsize(overall_result['chunk_bytes'])} / {naturalsize(overall_result['total_len'])})\n"
+        f"XTool overall deduplication ratio: {overall_result['xtool_dedup_ratio']:.2%} ({naturalsize(overall_result['transmitted_xtool_bytes'])} / {naturalsize(overall_result['total_len'])})\n"
+    )
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=param_values,
+            y=[result["dedup_ratio"] for result in results.values()],
+            mode="lines+markers",
+            name="DE Dedup Ratio",
+            marker=dict(symbol="circle"),
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=param_values,
+            y=[result["xtool_dedup_ratio"] for result in results.values()],
+            mode="lines+markers",
+            name="XTool Dedup Ratio",
+            marker=dict(symbol="square"),
+        )
+    )
+    fig.update_layout(
+        title="Deduplication Ratios vs " + param_name,
+        xaxis=dict(title=param_name, type="log", dtick=1, tickformat=".2s"),
+        yaxis=dict(title="Deduplication Ratio", tickformat=".2%"),
+        legend=dict(title="Metric"),
+        template="plotly_white",
+    )
     fig.show()

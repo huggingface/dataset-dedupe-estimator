@@ -28,6 +28,7 @@ def estimate_xtool(paths):
             "--token",
             os.environ["XTOOL_TOKEN"],
             "dedup",
+            "-s",
             "-o",
             tmp.name,
             *map(str, paths),
