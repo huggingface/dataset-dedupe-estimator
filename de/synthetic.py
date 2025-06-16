@@ -20,7 +20,11 @@ def generate_data(dtype, num_samples=1000):
     elif dtype in ("float", float):
         return np.random.uniform(0, 1_000_000, size=num_samples).round(3).tolist()
     elif dtype in ("str", str):
-        return [fake.word() for _ in range(num_samples)]
+        num_chars = np.random.randint(10, 200, size=num_samples)
+        return [fake.text(max_nb_chars=n_chars) for n_chars in num_chars]
+    elif dtype in ("largestr",):
+        num_chars = np.random.randint(100, 1000, size=num_samples)
+        return [fake.text(max_nb_chars=n_chars) for n_chars in num_chars]
     elif dtype == ("bool", bool):
         return np.random.choice([True, False], size=num_samples).tolist()
     elif isinstance(dtype, dict):
@@ -46,9 +50,9 @@ def generate_table(schema, num_samples=1000):
     return table
 
 
-def delete_rows(table, alter_points, n=10):
+def delete_rows(table, edit_points, n=10):
     pieces = []
-    for start, end in zip([0] + alter_points, alter_points + [1]):
+    for start, end in zip([0] + edit_points, edit_points + [1]):
         start_idx = int(start * len(table))
         end_idx = int(end * len(table))
         if end == 1:
@@ -58,9 +62,9 @@ def delete_rows(table, alter_points, n=10):
     return pa.concat_tables(pieces).combine_chunks()
 
 
-def insert_rows(table, schema, alter_points, n=10):
+def insert_rows(table, schema, edit_points, n=10):
     pieces = []
-    for start, end in zip([0] + alter_points, alter_points + [1]):
+    for start, end in zip([0] + edit_points, edit_points + [1]):
         start_idx = int(start * len(table))
         end_idx = int(end * len(table))
         pieces.append(table.slice(start_idx, end_idx - start_idx))
@@ -74,29 +78,33 @@ def append_rows(table, schema, ratio):
     return pa.concat_tables([table, new_part]).combine_chunks()
 
 
-def update_rows(table, schema, alter_points, columns):
+def update_rows(table, schema, edit_points, columns):
     df = table.to_pandas()
-    for place in alter_points:
+    for place in edit_points:
         idx = int(place * len(df))
         for column in columns:
             df.at[idx, column] = generate_data(schema[column], 1)[0]
     return pa.Table.from_pandas(df)
 
 
-def generate_alterated_tables(
-    schema, size, alter_points=(0.5,), append_ratio=0.05, update_columns=None
+def generate_synthetic_tables(
+    schema,
+    size,
+    edit_points=(0.5,),
+    append_ratio=0.05,
+    update_columns=None,
+    edit_size=10,
 ):
-    n = 10
     fields = list(schema.keys())
     table = generate_table(schema, size)
-    deleted = delete_rows(table, alter_points, n=n)
-    inserted = insert_rows(table, schema, alter_points, n=n)
+    deleted = delete_rows(table, edit_points, n=edit_size)
+    inserted = insert_rows(table, schema, edit_points, n=edit_size)
     appended = append_rows(table, schema, append_ratio)
-    updated = update_rows(table, schema, alter_points, columns=fields)
+    updated = update_rows(table, schema, edit_points, columns=fields)
     assert len(table) == size
     assert len(updated) == size
-    assert len(deleted) == size - n * len(alter_points)
-    assert len(inserted) == size + n * len(alter_points)
+    assert len(deleted) == size - edit_size * len(edit_points)
+    assert len(inserted) == size + edit_size * len(edit_points)
 
     result = {
         "deleted": deleted,
@@ -106,7 +114,7 @@ def generate_alterated_tables(
     }
     for key, fields in (update_columns or {}).items():
         result[f"updated_{key}"] = update_rows(
-            table, schema, alter_points, columns=fields
+            table, schema, edit_points, columns=fields
         )
 
     return table, result
