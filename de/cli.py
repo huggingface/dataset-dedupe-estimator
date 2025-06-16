@@ -26,7 +26,7 @@ from .fileutils import (
     get_page_chunk_sizes,
 )
 from .synthetic import (
-    generate_synthetic_tables,
+    FakeDataGenerator,
     write_and_compare_parquet,
     write_and_compare_json,
     write_and_compare_sqlite,
@@ -103,6 +103,13 @@ def cli():
 @click.option("--with-json", is_flag=True, help="Also calculate JSONLines stats")
 @click.option("--with-sqlite", is_flag=True, help="Also calculate SQLite stats")
 @click.option("--use-dictionary", is_flag=True, help="Use parquet dictionary encoding")
+@click.option(
+    "--cdc-min-size", default=256, help="Minimum CDC chunk size in KiB", type=int
+)
+@click.option(
+    "--cdc-max-size", default=1024, help="Maximum CDC chunk size in KiB", type=int
+)
+@click.option("--cdc-norm-level", default=0, help="CDC normalization level", type=int)
 def synthetic(
     schema,
     size,
@@ -112,6 +119,9 @@ def synthetic(
     use_dictionary,
     with_json,
     with_sqlite,
+    cdc_min_size,
+    cdc_max_size,
+    cdc_norm_level,
 ):
     """Generate synthetic data and compare the deduplication ratios.
     de synthetic -s 1 -e 1 '{"a": "int"}'
@@ -129,8 +139,9 @@ def synthetic(
 
     edit_points = np.linspace(0.5 / num_edits, 1 - 0.5 / num_edits, num_edits)
     schema = json.loads(schema)
-    original, tables = generate_synthetic_tables(
-        schema,
+
+    gen = FakeDataGenerator(schema, seed=42)
+    original, tables = gen.generate_synthetic_tables(
         size=size * 2**20,
         edit_size=edit_size,
         edit_points=list(edit_points),
@@ -139,6 +150,12 @@ def synthetic(
     )
 
     prefix = f"s{size}c{len(schema)}e{num_edits}"
+    cdc_params = {
+        "min_chunk_size": cdc_min_size * 1024,
+        "max_chunk_size": cdc_max_size * 1024,
+        "norm_level": cdc_norm_level,
+    }
+
     print("Writing Parquet files without CDC")
     results = write_and_compare_parquet(
         directory,
@@ -149,6 +166,7 @@ def synthetic(
         use_content_defined_chunking=False,
         use_dictionary=use_dictionary,
     )
+
     print("Writing Parquet files with CDC")
     results += write_and_compare_parquet(
         directory,
@@ -156,16 +174,19 @@ def synthetic(
         tables,
         prefix=prefix,
         postfix="cdc",
-        use_content_defined_chunking=True,
+        use_content_defined_chunking=cdc_params,
         use_dictionary=use_dictionary,
         # data_page_size=100 * 1024 * 1024,
     )
+
     if with_json:
         print("Writing JSONLines files")
         results += write_and_compare_json(directory, original, tables, prefix=prefix)
+
     if with_sqlite:
         print("Writing SQLite files")
         results += write_and_compare_sqlite(directory, original, tables, prefix=prefix)
+
     convert_dedupe_images_to_png(directory)
 
     for row in results:
@@ -218,7 +239,7 @@ def revisions(files, target_dir):
     help="Parquet data page size in bytes",
     type=int,
 )
-@click.option("--cdc-norm-factor", default=0, help="CDC normalization factor", type=int)
+@click.option("--cdc-norm-level", default=0, help="CDC normalization level", type=int)
 @click.option(
     "--max-processes",
     "-p",
@@ -239,7 +260,7 @@ def stats(
     disable_dictionary,
     cdc_min_size,
     cdc_max_size,
-    cdc_norm_factor,
+    cdc_norm_level,
     data_page_size,
     max_processes,
 ):
@@ -267,7 +288,7 @@ def stats(
         "use_content_defined_chunking": {
             "min_chunk_size": cdc_min_size * 1024,
             "max_chunk_size": cdc_max_size * 1024,
-            "norm_level": cdc_norm_factor,
+            "norm_level": cdc_norm_level,
         },
         "use_dictionary": not disable_dictionary,
         "data_page_size": data_page_size,
