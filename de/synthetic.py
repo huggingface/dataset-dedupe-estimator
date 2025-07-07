@@ -105,7 +105,7 @@ class FakeDataGenerator(DataGenerator):
         elif dtype in ("largestr",):
             num_chars = np.random.randint(100, 1000, size=num_samples)
             return [self.fake.text(max_nb_chars=n_chars) for n_chars in num_chars]
-        elif dtype == ("bool", bool):
+        elif dtype in ("bool", bool):
             return np.random.choice([True, False], size=num_samples).tolist()
         elif isinstance(dtype, dict):
             columns = [
