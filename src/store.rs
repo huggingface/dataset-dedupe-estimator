@@ -1,5 +1,5 @@
 use gearhash::Hasher;
-use indicatif::ParallelProgressIterator;
+use indicatif::{ParallelProgressIterator, ProgressIterator};
 use lz4_flex::block;
 use rayon::prelude::*;
 use std::collections::HashMap;
@@ -18,6 +18,7 @@ pub(crate) struct Chunk {
     size: usize,
     compressed: usize,
     first_seen_in: i64,
+    data: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Default)]
@@ -25,24 +26,42 @@ pub(crate) struct ChunkStore {
     total: usize,
     order: Vec<u64>,
     chunks: HashMap<u64, Chunk>,
+    store_data: bool,
 }
 
 impl ChunkStore {
+    pub fn new(store_data: bool) -> Self {
+        ChunkStore {
+            total: 0,
+            order: Vec::new(),
+            chunks: HashMap::new(),
+            store_data,
+        }
+    }
+
     pub fn add(&mut self, chunk: &[u8]) {
         let hash = xxh3_64(chunk);
         let comp = block::compress(chunk);
         self.total += chunk.len();
         self.order.push(hash);
+
+        let data = if self.store_data {
+            Some(chunk.to_vec())
+        } else {
+            None
+        };
+
         let chunk = Chunk {
             size: chunk.len(),
             compressed: comp.len(),
             first_seen_in: 0,
+            data,
         };
         self.chunks.insert(hash, chunk);
     }
 
-    pub fn from_stream<R: Read>(reader: &mut R) -> Result<Self, std::io::Error> {
-        let mut store = ChunkStore::default();
+    pub fn from_stream<R: Read>(reader: &mut R, store_data: bool) -> Result<Self, std::io::Error> {
+        let mut store = ChunkStore::new(store_data);
         let mut hasher = Hasher::default();
         let mut buffer = [0; READ_BUFFER_SIZE];
         let mut chunk = Vec::<u8>::with_capacity(MAX_LEN);
@@ -73,24 +92,32 @@ impl ChunkStore {
         Ok(store)
     }
 
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, std::io::Error> {
+    pub fn from_strings(data: &[String], store_data: bool) -> Result<Vec<Self>, std::io::Error> {
+        data.iter()
+            .progress_count(data.len() as u64)
+            .map(|bytes| ChunkStore::from_stream(&mut bytes.as_bytes(), store_data))
+            .collect()
+    }
+
+    pub fn from_file<P: AsRef<Path>>(path: P, store_data: bool) -> Result<Self, std::io::Error> {
         let file = File::open(path)?;
         let mut reader = BufReader::new(file);
-        Self::from_stream(&mut reader)
+        Self::from_stream(&mut reader, store_data)
     }
 
     pub fn from_files<P: AsRef<Path> + Send + Sync>(
         paths: &[P],
+        store_data: bool,
     ) -> Result<Vec<Self>, std::io::Error> {
-        return paths
+        paths
             .par_iter()
             .progress_count(paths.len() as u64)
-            .map(|path| ChunkStore::from_file(path))
-            .collect();
+            .map(|path| ChunkStore::from_file(path, store_data))
+            .collect()
     }
 
-    pub fn merge(stores: &mut [ChunkStore]) -> Self {
-        let mut merged = ChunkStore::default();
+    pub fn merge(stores: &mut [ChunkStore], store_data: bool) -> Self {
+        let mut merged = ChunkStore::new(store_data);
 
         for (index, store) in stores.iter_mut().enumerate() {
             merged.total += store.total;
@@ -117,5 +144,22 @@ impl ChunkStore {
             .iter()
             .map(|hash| self.chunks[hash].first_seen_in as usize)
             .collect()
+    }
+
+    pub fn data_chunks(&self) -> Option<HashMap<u64, Vec<u8>>> {
+        if !self.store_data {
+            return None;
+        }
+
+        let data_chunks = self
+            .chunks
+            .iter()
+            .map(|(hash, chunk)| {
+                let data = chunk.data.as_ref().expect("Data should be available");
+                (hash.clone(), data.clone())
+            })
+            .collect();
+
+        Some(data_chunks)
     }
 }
