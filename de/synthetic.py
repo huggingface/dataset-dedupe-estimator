@@ -1,11 +1,11 @@
-from pathlib import Path
-
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from faker import Faker
-from PIL import Image
 import sqlite3
+from rich.console import Console
+from rich.table import Table
+from humanize import naturalsize
 
 from .estimate import estimate_de
 
@@ -183,7 +183,6 @@ def write_and_compare_sqlite(directory, original, alts, prefix):
     results = []
     original_df = original.to_pandas()
     for compression in ["none"]:
-        comp = None if compression == "none" else compression
         a = directory / f"{prefix}-{compression}-original.sqlite"
         con = sqlite3.connect(a)
         original_df.to_sql("table", con, if_exists="replace", index=False)
@@ -198,12 +197,44 @@ def write_and_compare_sqlite(directory, original, alts, prefix):
     return results
 
 
-def convert_dedupe_images_to_png(directory):
-    directory = Path(directory)
+def pretty_print_stats(results):
+    has_xtool = "transmitted_xtool_bytes" in results[0]
 
-    for ppm in directory.iterdir():
-        if ppm.suffix == ".ppm":
-            png = ppm.with_suffix(".png")
-            with Image.open(ppm) as img:
-                img.save(png, "PNG")
-            ppm.unlink()
+    # dump the results to the console as a rich formatted table
+    results = sorted(results, key=lambda x: (x["edit"], x["compression"], x["kind"]))
+
+    console = Console()
+    table = Table(show_header=True, header_style="bold magenta")
+    table.add_column("Title")
+    table.add_column("Compression", justify="left")
+    table.add_column("Parquet CDC", justify="left")
+    table.add_column("Total Size", justify="right")
+    table.add_column("Chunk Size", justify="right")
+    table.add_column("Compressed Chunk Size", justify="right")
+    table.add_column("Dedup Ratio", justify="right")
+    table.add_column("Compressed Dedup Ratio", justify="right")
+    if has_xtool:
+        table.add_column("Transmitted XTool Bytes", justify="right")
+
+    prev_group = None
+    for row in results:
+        group = (row["edit"], row["compression"])
+        if group != prev_group:
+            table.add_section()
+            prev_group = group
+
+        values = [
+            row["edit"],
+            row["compression"],
+            row["kind"],
+            naturalsize(row["total_len"], binary=True),
+            naturalsize(row["chunk_bytes"], binary=True),
+            naturalsize(row["compressed_chunk_bytes"], binary=True),
+            "{:.0%}".format(row["chunk_bytes"] / row["total_len"]),
+            "{:.0%}".format(row["compressed_chunk_bytes"] / row["total_len"]),
+        ]
+        if has_xtool:
+            values.append(naturalsize(row["transmitted_xtool_bytes"], binary=True))
+        table.add_row(*values)
+
+    console.print(table)

@@ -1,6 +1,7 @@
 use gearhash::Hasher;
 use indicatif::{ParallelProgressIterator, ProgressIterator};
 use lz4_flex::block;
+use pyo3::IntoPyObject;
 use rayon::prelude::*;
 use std::collections::HashMap;
 use std::fs::File;
@@ -13,7 +14,7 @@ const MIN_LEN: usize = 65536 / 8;
 const MAX_LEN: usize = 65536 * 2;
 const READ_BUFFER_SIZE: usize = 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, IntoPyObject)]
 pub(crate) struct Chunk {
     size: usize,
     compressed: usize,
@@ -146,20 +147,7 @@ impl ChunkStore {
             .collect()
     }
 
-    pub fn data_chunks(&self) -> Option<HashMap<u64, Vec<u8>>> {
-        if !self.store_data {
-            return None;
-        }
-
-        let data_chunks = self
-            .chunks
-            .iter()
-            .map(|(hash, chunk)| {
-                let data = chunk.data.as_ref().expect("Data should be available");
-                (hash.clone(), data.clone())
-            })
-            .collect();
-
-        Some(data_chunks)
+    pub fn chunks(&self) -> HashMap<u64, Chunk> {
+        self.chunks.clone()
     }
 }
