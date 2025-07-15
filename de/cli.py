@@ -11,8 +11,6 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm.contrib.concurrent import process_map
-from rich.console import Console
-from rich.table import Table
 from humanize import naturalsize
 import plotly.graph_objects as go
 
@@ -30,7 +28,7 @@ from .synthetic import (
     write_and_compare_parquet,
     write_and_compare_json,
     write_and_compare_sqlite,
-    convert_dedupe_images_to_png,
+    pretty_print_stats,
 )
 
 
@@ -46,32 +44,6 @@ def pyarrow_has_cdc():
         except TypeError:
             return False
     return True
-
-
-def pretty_print_stats(results):
-    # dump the results to the console as a rich formatted table
-    console = Console()
-    table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Title")
-    table.add_column("Total Size", justify="right")
-    table.add_column("Chunk Size", justify="right")
-    table.add_column("Compressed Chunk Size", justify="right")
-    table.add_column("Dedup Ratio", justify="right")
-    table.add_column("Compressed Dedup Ratio", justify="right")
-    table.add_column("Transmitted XTool Bytes", justify="right")
-    for i, row in enumerate(results):
-        table.add_row(
-            row["title"],
-            naturalsize(row["total_len"], binary=True),
-            naturalsize(row["chunk_bytes"], binary=True),
-            naturalsize(row["compressed_chunk_bytes"], binary=True),
-            "{:.0%}".format(row["chunk_bytes"] / results[i]["total_len"]),
-            "{:.0%}".format(row["compressed_chunk_bytes"] / results[i]["total_len"]),
-            naturalsize(row["transmitted_xtool_bytes"], binary=True)
-            if "transmitted_xtool_bytes" in row
-            else "",
-        )
-    console.print(table)
 
 
 @click.group()
@@ -187,13 +159,6 @@ def synthetic(
         print("Writing SQLite files")
         results += write_and_compare_sqlite(directory, original, tables, prefix=prefix)
 
-    convert_dedupe_images_to_png(directory)
-
-    for row in results:
-        row["title"] = (
-            f"{row['edit'].capitalize()} / {row['compression']} / {row['kind']}"
-        )
-    results = sorted(results, key=lambda x: x["title"])
     pretty_print_stats(results)
 
 
@@ -509,7 +474,6 @@ def calculate_parameter_impact(
     help="Calculate the impact of max page size on deduplication ratio",
 )
 def param_impact(file, directory, row_group_size, data_page_size):
-    Mi = 1024 * 1024
     if row_group_size:
         param_name = "row_group_size"
         param_default = 2**20

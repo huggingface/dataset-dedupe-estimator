@@ -1,6 +1,7 @@
+use png::Encoder;
 use std::cmp::min;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 
 #[derive(Copy, Clone)]
 struct RGB {
@@ -255,21 +256,28 @@ fn generate_color_sequence(s: &[usize]) -> Vec<RGB> {
     ret
 }
 
-pub(crate) fn write_ppm(segments: &[usize], filename: &str) -> io::Result<()> {
+pub(crate) fn write_png(segments: &[usize], filename: &str) -> io::Result<()> {
     let colors = generate_color_sequence(segments);
-    let mut fout = File::create(filename)?;
-    writeln!(fout, "P6")?;
-    writeln!(fout, "{} {}", IMAGE_DIM, IMAGE_DIM)?;
-    writeln!(fout, "255")?;
-    // each position in colors is an 1x8 block in the image
+    let file = File::create(filename)?;
+    let ref mut w = io::BufWriter::new(file);
+
+    let mut encoder = Encoder::new(w, IMAGE_DIM as u32, IMAGE_DIM as u32);
+    encoder.set_color(png::ColorType::Rgb);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+
+    let mut data = Vec::with_capacity(IMAGE_DIM * IMAGE_DIM * 3);
     for i in 0..IMAGE_DIM {
         for j in 0..IMAGE_DIM {
             let block_x = i / BLOCK_DIM;
             let block_y = j;
             let block_idx = block_x * IMAGE_DIM + block_y;
             let color = colors[block_idx];
-            fout.write_all(&[color.r, color.g, color.b])?;
+            data.push(color.r);
+            data.push(color.g);
+            data.push(color.b);
         }
     }
+    writer.write_image_data(&data).unwrap();
     Ok(())
 }
