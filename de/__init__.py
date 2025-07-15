@@ -1,3 +1,4 @@
+import glob
 from pathlib import Path
 
 from IPython.display import display, Markdown
@@ -16,8 +17,10 @@ __all__ = [
 ]
 
 
-def estimate(paths):
+def estimate(*patterns):
     """Estimate the deduplication size of the given paths."""
+    paths = sum([glob.glob(pattern) for pattern in patterns], [])
+
     de_result = estimate_de(paths)
     xtool_result = estimate_xtool(paths)
 
@@ -40,7 +43,12 @@ _markdown_header = """
 
 
 def visualize(
-    original, tables, directory=".", prefix="temp", with_content_defined_chunking=False
+    original,
+    tables,
+    directory=".",
+    prefix="temp",
+    with_content_defined_chunking=False,
+    **parquet_options,
 ):
     results = write_and_compare_parquet(
         Path(directory),
@@ -49,6 +57,7 @@ def visualize(
         prefix=prefix,
         postfix="nocdc",
         use_content_defined_chunking=False,
+        **parquet_options,
     )
     if with_content_defined_chunking:
         results += write_and_compare_parquet(
@@ -58,6 +67,7 @@ def visualize(
             prefix=prefix,
             postfix="cdc",
             use_content_defined_chunking=True,
+            **parquet_options,
         )
 
     for name in tables.keys():
