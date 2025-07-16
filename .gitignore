@@ -74,3 +74,6 @@ docs/_build/
 *.parquet
 *.jsonlines
 *.sqlite
+
+notebooks/*.parquet
+notebooks/*.png

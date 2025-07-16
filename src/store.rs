@@ -18,6 +18,7 @@ const READ_BUFFER_SIZE: usize = 1024 * 1024;
 pub(crate) struct Chunk {
     size: usize,
     compressed: usize,
+    seen_in: Vec<i64>,
     first_seen_in: i64,
     data: Option<Vec<u8>>,
 }
@@ -55,6 +56,7 @@ impl ChunkStore {
         let chunk = Chunk {
             size: chunk.len(),
             compressed: comp.len(),
+            seen_in: vec![],
             first_seen_in: 0,
             data,
         };
@@ -124,10 +126,11 @@ impl ChunkStore {
             merged.total += store.total;
             merged.order.extend(store.order.iter());
             for (hash, chunk) in &mut store.chunks {
-                merged.chunks.entry(*hash).or_insert_with(|| {
+                let entry = merged.chunks.entry(*hash).or_insert_with(|| {
                     chunk.first_seen_in = index as i64;
                     chunk.clone()
                 });
+                entry.seen_in.push(index as i64);
             }
         }
 
@@ -147,7 +150,10 @@ impl ChunkStore {
             .collect()
     }
 
-    pub fn chunks(&self) -> HashMap<u64, Chunk> {
-        self.chunks.clone()
+    pub fn chunks(&self) -> Vec<(u64, Chunk)> {
+        self.order
+            .iter()
+            .map(|hash| (*hash, self.chunks[hash].clone()))
+            .collect()
     }
 }

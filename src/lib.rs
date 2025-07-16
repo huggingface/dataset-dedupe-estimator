@@ -29,9 +29,10 @@ fn estimate(file_paths: Vec<String>) -> PyResult<(usize, usize, usize)> {
 }
 
 #[pyfunction]
-fn chunks(data: Vec<String>) -> PyResult<HashMap<u64, Chunk>> {
-    let mut stores = ChunkStore::from_strings(&data, true)?;
-    let merged = ChunkStore::merge(&mut stores, true);
+#[pyo3(signature = (file_paths, store_data = false))]
+fn chunks(file_paths: Vec<String>, store_data: bool) -> PyResult<Vec<(u64, Chunk)>> {
+    let mut stores = ChunkStore::from_files(&file_paths, store_data)?;
+    let merged = ChunkStore::merge(&mut stores, store_data);
     Ok(merged.chunks())
 }
 
