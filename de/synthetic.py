@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -136,6 +138,10 @@ class FakeDataGenerator(DataGenerator):
 
 
 def write_parquet(path, table, **kwargs):
+    if isinstance(table, tuple):
+        table, options = table
+        kwargs.update(options)
+
     pq.write_table(table, path, **kwargs)
     readback = pq.read_table(path)
     assert table.equals(readback)
@@ -144,6 +150,7 @@ def write_parquet(path, table, **kwargs):
 def write_and_compare_parquet(
     directory, original, alts, prefix, postfix, **parquet_options
 ):
+    directory = Path(directory)
     results = []
     for compression in ["none", "zstd", "snappy"]:
         if compression == "none":
@@ -157,7 +164,13 @@ def write_and_compare_parquet(
             write_parquet(b, table, **parquet_options)
             result = estimate_de([a, b])
             results.append(
-                {"kind": postfix, "edit": name, "compression": compression, **result}
+                {
+                    "path": b,
+                    "kind": postfix,
+                    "edit": name,
+                    "compression": compression,
+                    **result,
+                }
             )
     return results
 
