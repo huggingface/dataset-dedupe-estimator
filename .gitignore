@@ -76,4 +76,3 @@ docs/_build/
 *.sqlite
 
 notebooks/*.parquet
-notebooks/*.png
