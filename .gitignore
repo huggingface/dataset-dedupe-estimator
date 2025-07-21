@@ -76,3 +76,5 @@ docs/_build/
 *.sqlite
 
 notebooks/*.parquet
+notebooks/orca*
+notebooks/.ipynb_checkpoints
