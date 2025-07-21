@@ -33,11 +33,18 @@ def estimate(*patterns, xtool=False):
         )
 
 
-_markdown_header = """
+_without_cdc_markdown_header = """
+#### Parquet Deduplication for {name}
+
+| Compression | Vanilla Parquet |
+|-------------|-----------------|
+"""
+
+_with_cdc_markdown_header = """
 #### Parquet Deduplication for {name}
     
-| Variant | No Compression | Zstd Compression  | Snappy Compression |
-|---------|----------------|-------------------|--------------------|
+| Compression | Vanilla Parquet | CDC Parquet |
+|-------------|-----------------|-------------|
 """
 
 
@@ -47,20 +54,19 @@ def visualize(
     directory=".",
     prefix="temp",
     with_cdc=False,
-    with_nocdc=True,
+    compressions=("none", "snappy"),
     **parquet_options,
 ):
-    results = []
-    if with_nocdc:
-        results = write_and_compare_parquet(
-            directory,
-            original,
-            tables,
-            prefix=prefix,
-            postfix="nocdc",
-            use_content_defined_chunking=False,
-            **parquet_options,
-        )
+    results = write_and_compare_parquet(
+        directory,
+        original,
+        tables,
+        prefix=prefix,
+        postfix="nocdc",
+        compressions=compressions,
+        use_content_defined_chunking=False,
+        **parquet_options,
+    )
     if with_cdc:
         results += write_and_compare_parquet(
             directory,
@@ -68,32 +74,24 @@ def visualize(
             tables,
             prefix=prefix,
             postfix="cdc",
+            compressions=compressions,
             use_content_defined_chunking=True,
             **parquet_options,
         )
+        header = _with_cdc_markdown_header
+    else:
+        header = _without_cdc_markdown_header
 
     for name in tables.keys():
-        markdown_table = _markdown_header.format(name=name.capitalize())
-
-        if with_nocdc:
-            row_vanilla = "| Vanilla Parquet "
-            for compression in ["none", "zstd", "snappy"]:
-                heatmap_path_nocdc = (
-                    f"{prefix}-{compression}-{name.lower()}-nocdc.parquet.png"
-                )
-                row_vanilla += f"| ![{name} Vanilla]({heatmap_path_nocdc}) "
-            markdown_table += row_vanilla + "|\n"
-
-        if with_cdc:
-            row_cdc = "| CDC Parquet "
-            for compression in ["none", "zstd", "snappy"]:
-                heatmap_path_cdc = (
-                    f"{prefix}-{compression}-{name.lower()}-cdc.parquet.png"
-                )
-                row_cdc += f"| ![{name} CDC]({heatmap_path_cdc}) "
-            markdown_table += row_cdc + "|\n"
-
-        markdown_table += "\n"
+        markdown_table = header.format(name=name.capitalize())
+        for compression in compressions:
+            row = f"| {compression.capitalize()} "
+            path = f"{prefix}-{compression}-{name.lower()}-nocdc.parquet.png"
+            row += f"| ![Vanilla Parquet {compression}]({path}) "
+            if with_cdc:
+                path = f"{prefix}-{compression}-{name.lower()}-cdc.parquet.png"
+                row += f"| ![CDC Parquet {compression}]({path}) "
+            markdown_table += row + "|\n"
         display(Markdown(markdown_table))
 
     pretty_print_stats(results)

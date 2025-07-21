@@ -148,11 +148,17 @@ def write_parquet(path, table, **kwargs):
 
 
 def write_and_compare_parquet(
-    directory, original, alts, prefix, postfix, **parquet_options
+    directory,
+    original,
+    alts,
+    prefix,
+    postfix,
+    compressions=("none", "zstd", "snappy"),
+    **parquet_options,
 ):
     directory = Path(directory)
     results = []
-    for compression in ["none", "zstd", "snappy"]:
+    for compression in compressions:
         if compression == "none":
             parquet_options["compression"] = None
         else:
