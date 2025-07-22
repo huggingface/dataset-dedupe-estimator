@@ -1,3 +1,10 @@
+---
+title: "Parquet Content-Defined Chunking"
+authors:
+- user: kszucs
+---
+
+
 # Parquet Content-Defined Chunking
 
 
