@@ -79,19 +79,6 @@ table[:5].to_pandas()
 ```
 
 <div>
-<style scoped>
-    .dataframe tbody tr th:only-of-type {
-        vertical-align: middle;
-    }
-
-    .dataframe tbody tr th {
-        vertical-align: top;
-    }
-
-    .dataframe thead th {
-        text-align: right;
-    }
-</style>
 
 <table class="dataframe" data-quarto-postprocess="true" data-border="1">
 <thead>
@@ -168,7 +155,7 @@ and write parquet (and other file formats) files to the Hub using the
 pq.write_table(table, "hf://datasets/kszucs/pq/orca.parquet")
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████| 96.1MB / 96.1MB, 48.0kB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████| 96.1MB / 96.1MB, 48.0kB/s  
 
     Total Bytes:  96.1M
     Total Transfer:  96.1M
@@ -223,7 +210,7 @@ transfer.
 pq.write_table(table, "hf://datasets/kszucs/pq/orca-copy.parquet")
 ```
 
-    New Data Upload                         : |                                                   |  0.00B /  0.00B,  0.00B/s  
+    New Data Upload: |                                                   |  0.00B /  0.00B,  0.00B/s  
 
     Total Bytes:  96.1M
     Total Transfer:  0.00
@@ -236,7 +223,7 @@ again but to a different repository:
 pq.write_table(table, "hf://datasets/kszucs/pq-copy/orca-copy-again.parquet")
 ```
 
-    New Data Upload                         : |                                                   |  0.00B /  0.00B,  0.00B/s  
+    New Data Upload: |                                                   |  0.00B /  0.00B,  0.00B/s  
 
     Total Bytes:  96.1M
     Total Transfer:  0.00
@@ -278,7 +265,7 @@ transferred:
 pq.write_table(table_with_new_columns, "hf://datasets/kszucs/pq/orca-added-columns.parquet")
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████|  575kB /  575kB,  288kB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████|  575kB /  575kB,  288kB/s  
 
     Total Bytes:  96.6M
     Total Transfer:  575k
@@ -295,7 +282,7 @@ Same applies to removing columns, as we can see below:
 pq.write_table(table_with_removed_columns, "hf://datasets/kszucs/pq/orca-removed-columns.parquet")
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████| 37.7kB / 37.7kB, 27.0kB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████| 37.7kB / 37.7kB, 27.0kB/s  
 
     Total Bytes:  70.6M
     Total Transfer:  37.7k
@@ -326,20 +313,20 @@ visualize(table, {"with-new-columns": table_with_new_columns}, prefix="orca")
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-with-new-columns-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-with-new-columns-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-with-new-columns-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-with-new-columns-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
 </tr>
 </tbody>
 </table>
 
 <pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">              </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Compressed </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Compressed </span>┃
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Title        </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Compression </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Parquet CDC </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Total Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Dedup Ratio </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Dedup Ratio </span>┃
+┃              ┃             ┃             ┃            ┃            ┃   Compressed ┃             ┃    Compressed ┃
+┃ Title        ┃ Compression ┃ Parquet CDC ┃ Total Size ┃ Chunk Size ┃   Chunk Size ┃ Dedup Ratio ┃   Dedup Ratio ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
 │ with-new-co… │ none        │ nocdc       │  299.3 MiB │  150.1 MiB │     95.4 MiB │         50% │           32% │
 ├──────────────┼─────────────┼─────────────┼────────────┼────────────┼──────────────┼─────────────┼───────────────┤
@@ -373,20 +360,20 @@ visualize(table, {"with-removed-columns": table_with_removed_columns}, prefix="o
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-with-removed-columns-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-with-removed-columns-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-with-removed-columns-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-with-removed-columns-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
 </tr>
 </tbody>
 </table>
 
 <pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">              </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Compressed </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Compressed </span>┃
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Title        </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Compression </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Parquet CDC </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Total Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Dedup Ratio </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Dedup Ratio </span>┃
+┃              ┃             ┃             ┃            ┃            ┃   Compressed ┃             ┃    Compressed ┃
+┃ Title        ┃ Compression ┃ Parquet CDC ┃ Total Size ┃ Chunk Size ┃   Chunk Size ┃ Dedup Ratio ┃   Dedup Ratio ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
 │ with-remove… │ none        │ nocdc       │  256.9 MiB │  149.4 MiB │     94.8 MiB │         58% │           37% │
 ├──────────────┼─────────────┼─────────────┼────────────┼────────────┼──────────────┼─────────────┼───────────────┤
@@ -421,7 +408,7 @@ table_with_casted_column = table_without_text.set_column(
 pq.write_table(table_with_casted_column, "hf://datasets/kszucs/pq/orca-casted-column.parquet")
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████|  181kB /  181kB,  113kB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████|  181kB /  181kB,  113kB/s  
 
     Total Bytes:  1.80M
     Total Transfer:  181k
@@ -449,20 +436,20 @@ visualize(table_without_text, {"with-casted-column": table_with_casted_column}, 
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-with-casted-column-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-with-casted-column-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-with-casted-column-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-with-casted-column-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
 </tr>
 </tbody>
 </table>
 
 <pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">              </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Compressed </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Compressed </span>┃
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Title        </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Compression </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Parquet CDC </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Total Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Dedup Ratio </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Dedup Ratio </span>┃
+┃              ┃             ┃             ┃            ┃            ┃   Compressed ┃             ┃    Compressed ┃
+┃ Title        ┃ Compression ┃ Parquet CDC ┃ Total Size ┃ Chunk Size ┃   Chunk Size ┃ Dedup Ratio ┃   Dedup Ratio ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
 │ with-casted… │ none        │ nocdc       │    5.1 MiB │    2.7 MiB │      1.9 MiB │         53% │           37% │
 ├──────────────┼─────────────┼─────────────┼────────────┼────────────┼──────────────┼─────────────┼───────────────┤
@@ -494,7 +481,7 @@ data is already known to the Xet storage layer:
 pq.write_table(table_with_appended_rows, "hf://datasets/kszucs/pq/orca-appended-rows.parquet")
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████| 10.3MB / 10.3MB, 1.36MB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████| 10.3MB / 10.3MB, 1.36MB/s  
 
     Total Bytes:  106M
     Total Transfer:  10.3M
@@ -519,20 +506,20 @@ visualize(table, {"with-appended-rows": table_with_appended_rows}, prefix="orca"
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-with-appended-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-with-appended-rows-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-with-appended-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-with-appended-rows-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
 </tr>
 </tbody>
 </table>
 
 <pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">              </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Compressed </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Compressed </span>┃
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Title        </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Compression </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Parquet CDC </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Total Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Dedup Ratio </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Dedup Ratio </span>┃
+┃              ┃             ┃             ┃            ┃            ┃   Compressed ┃             ┃    Compressed ┃
+┃ Title        ┃ Compression ┃ Parquet CDC ┃ Total Size ┃ Chunk Size ┃   Chunk Size ┃ Dedup Ratio ┃   Dedup Ratio ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
 │ with-append… │ none        │ nocdc       │  313.6 MiB │  165.1 MiB │    104.8 MiB │         53% │           33% │
 ├──────────────┼─────────────┼─────────────┼────────────┼────────────┼──────────────┼─────────────┼───────────────┤
@@ -588,7 +575,7 @@ assert len(table_with_inserted_rows) == 103_000
 pq.write_table(table_with_inserted_rows, "hf://datasets/kszucs/pq/orca-inserted-rows.parquet")
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████| 89.8MB / 89.8MB, 42.7kB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████| 89.8MB / 89.8MB, 42.7kB/s  
 
     Total Bytes:  99.1M
     Total Transfer:  89.8M
@@ -597,7 +584,7 @@ pq.write_table(table_with_inserted_rows, "hf://datasets/kszucs/pq/orca-inserted-
 pq.write_table(table_with_deleted_rows, "hf://datasets/kszucs/pq/orca-deleted-rows.parquet")
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████| 78.2MB / 78.2MB, 46.5kB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████| 78.2MB / 78.2MB, 46.5kB/s  
 
     Total Bytes:  92.2M
     Total Transfer:  78.2M
@@ -628,12 +615,12 @@ visualize(
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-deleted-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-deleted-rows-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-deleted-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-deleted-rows-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
 </tr>
 </tbody>
@@ -655,20 +642,20 @@ alt="Vanilla Parquet snappy" /></td>
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-inserted-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-inserted-rows-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-inserted-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-inserted-rows-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
 </tr>
 </tbody>
 </table>
 
 <pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">              </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Compressed </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Compressed </span>┃
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Title        </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Compression </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Parquet CDC </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Total Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Dedup Ratio </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">  Dedup Ratio </span>┃
+┃              ┃             ┃             ┃            ┃            ┃    Compressed ┃             ┃   Compressed ┃
+┃ Title        ┃ Compression ┃ Parquet CDC ┃ Total Size ┃ Chunk Size ┃    Chunk Size ┃ Dedup Ratio ┃  Dedup Ratio ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━┩
 │ deleted-rows │ none        │ nocdc       │  292.6 MiB │  176.8 MiB │     112.2 MiB │         60% │          38% │
 ├──────────────┼─────────────┼─────────────┼────────────┼────────────┼───────────────┼─────────────┼──────────────┤
@@ -730,11 +717,7 @@ visualize(
 #### Parquet Deduplication for With-deleted-rows
 
 <table style="width:100%;">
-<colgroup>
-<col style="width: 30%" />
-<col style="width: 39%" />
-<col style="width: 30%" />
-</colgroup>
+
 <thead>
 <tr>
 <th>Compression</th>
@@ -745,16 +728,16 @@ visualize(
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-with-deleted-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-with-deleted-rows-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
-<td><img src="orca-none-with-deleted-rows-cdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-with-deleted-rows-cdc.parquet.png"
 alt="CDC Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-with-deleted-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-with-deleted-rows-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
-<td><img src="orca-snappy-with-deleted-rows-cdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-with-deleted-rows-cdc.parquet.png"
 alt="CDC Parquet snappy" /></td>
 </tr>
 </tbody>
@@ -763,11 +746,7 @@ alt="CDC Parquet snappy" /></td>
 #### Parquet Deduplication for With-inserted-rows
 
 <table style="width:100%;">
-<colgroup>
-<col style="width: 30%" />
-<col style="width: 39%" />
-<col style="width: 30%" />
-</colgroup>
+
 <thead>
 <tr>
 <th>Compression</th>
@@ -778,24 +757,24 @@ alt="CDC Parquet snappy" /></td>
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-with-inserted-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-with-inserted-rows-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
-<td><img src="orca-none-with-inserted-rows-cdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-with-inserted-rows-cdc.parquet.png"
 alt="CDC Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-with-inserted-rows-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-with-inserted-rows-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
-<td><img src="orca-snappy-with-inserted-rows-cdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-with-inserted-rows-cdc.parquet.png"
 alt="CDC Parquet snappy" /></td>
 </tr>
 </tbody>
 </table>
 
 <pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">              </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Compressed </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Compressed </span>┃
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Title        </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Compression </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Parquet CDC </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Total Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Dedup Ratio </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Dedup Ratio </span>┃
+┃              ┃             ┃             ┃            ┃            ┃   Compressed ┃             ┃    Compressed ┃
+┃ Title        ┃ Compression ┃ Parquet CDC ┃ Total Size ┃ Chunk Size ┃   Chunk Size ┃ Dedup Ratio ┃   Dedup Ratio ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
 │ with-delete… │ none        │ cdc         │  292.9 MiB │  155.4 MiB │     98.7 MiB │         53% │           34% │
 │ with-delete… │ none        │ nocdc       │  292.6 MiB │  176.8 MiB │    112.2 MiB │         60% │           38% │
@@ -820,7 +799,7 @@ table first with content-defined chunking enabled:
 pq.write_table(table, "hf://datasets/kszucs/pq/orca-cdc.parquet", use_content_defined_chunking=True)
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████| 94.5MB / 94.5MB, 46.5kB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████| 94.5MB / 94.5MB, 46.5kB/s  
 
     Total Bytes:  96.4M
     Total Transfer:  94.5M
@@ -833,7 +812,7 @@ pq.write_table(
 )
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████| 6.00MB / 6.00MB, 1.00MB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████| 6.00MB / 6.00MB, 1.00MB/s  
 
     Total Bytes:  99.3M
     Total Transfer:  6.00M
@@ -846,7 +825,7 @@ pq.write_table(
 )
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████| 7.57MB / 7.57MB, 1.35MB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████| 7.57MB / 7.57MB, 1.35MB/s  
 
     Total Bytes:  92.4M
     Total Transfer:  7.57M
@@ -888,11 +867,7 @@ visualize(table, cases, with_cdc=True, prefix="orca")
 #### Parquet Deduplication for Small-row-groups
 
 <table style="width:100%;">
-<colgroup>
-<col style="width: 30%" />
-<col style="width: 39%" />
-<col style="width: 30%" />
-</colgroup>
+
 <thead>
 <tr>
 <th>Compression</th>
@@ -903,16 +878,16 @@ visualize(table, cases, with_cdc=True, prefix="orca")
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-small-row-groups-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-small-row-groups-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
-<td><img src="orca-none-small-row-groups-cdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-small-row-groups-cdc.parquet.png"
 alt="CDC Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-small-row-groups-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-small-row-groups-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
-<td><img src="orca-snappy-small-row-groups-cdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-small-row-groups-cdc.parquet.png"
 alt="CDC Parquet snappy" /></td>
 </tr>
 </tbody>
@@ -921,11 +896,7 @@ alt="CDC Parquet snappy" /></td>
 #### Parquet Deduplication for Medium-row-groups
 
 <table style="width:100%;">
-<colgroup>
-<col style="width: 30%" />
-<col style="width: 39%" />
-<col style="width: 30%" />
-</colgroup>
+
 <thead>
 <tr>
 <th>Compression</th>
@@ -936,24 +907,24 @@ alt="CDC Parquet snappy" /></td>
 <tbody>
 <tr>
 <td>None</td>
-<td><img src="orca-none-medium-row-groups-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-medium-row-groups-nocdc.parquet.png"
 alt="Vanilla Parquet none" /></td>
-<td><img src="orca-none-medium-row-groups-cdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-none-medium-row-groups-cdc.parquet.png"
 alt="CDC Parquet none" /></td>
 </tr>
 <tr>
 <td>Snappy</td>
-<td><img src="orca-snappy-medium-row-groups-nocdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-medium-row-groups-nocdc.parquet.png"
 alt="Vanilla Parquet snappy" /></td>
-<td><img src="orca-snappy-medium-row-groups-cdc.parquet.png"
+<td><img src="https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/parquet-cdc/orca-snappy-medium-row-groups-cdc.parquet.png"
 alt="CDC Parquet snappy" /></td>
 </tr>
 </tbody>
 </table>
 
 <pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">              </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Compressed </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Compressed </span>┃
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Title        </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Compression </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Parquet CDC </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Total Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Dedup Ratio </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">  Dedup Ratio </span>┃
+┃              ┃             ┃             ┃            ┃            ┃    Compressed ┃             ┃   Compressed ┃
+┃ Title        ┃ Compression ┃ Parquet CDC ┃ Total Size ┃ Chunk Size ┃    Chunk Size ┃ Dedup Ratio ┃  Dedup Ratio ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━┩
 │ medium-row-… │ none        │ cdc         │    2.9 GiB │    1.5 GiB │     957.5 MiB │         50% │          32% │
 │ medium-row-… │ none        │ nocdc       │    2.9 GiB │    1.5 GiB │     982.0 MiB │         52% │          33% │
@@ -1033,7 +1004,7 @@ dst = "hf://datasets/kszucs/pq/hermes-2.5-cdc.parquet"
 df.to_parquet(dst, use_content_defined_chunking=True)
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████|  799MB /  799MB,  197kB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████|  799MB /  799MB,  197kB/s  
 
     Total Bytes:  799M
     Total Transfer:  799M
@@ -1044,7 +1015,7 @@ short_dst = "hf://datasets/kszucs/pq/hermes-2.5-cdc-short.parquet"
 short_df.to_parquet(short_dst, use_content_defined_chunking=True)
 ```
 
-    New Data Upload                         : 100%|███████████████████████████████████████████████| 21.9MB / 21.9MB, 45.4kB/s  
+    New Data Upload: 100%|███████████████████████████████████████████████| 21.9MB / 21.9MB, 45.4kB/s  
 
     Total Bytes:  801M
     Total Transfer:  21.9M
@@ -1064,11 +1035,7 @@ visualize(
 #### Parquet Deduplication for Hermes-2.5-short-conversations
 
 <table style="width:100%;">
-<colgroup>
-<col style="width: 30%" />
-<col style="width: 39%" />
-<col style="width: 30%" />
-</colgroup>
+
 <thead>
 <tr>
 <th>Compression</th>
@@ -1099,8 +1066,8 @@ alt="CDC Parquet snappy" /></td>
 </table>
 
 <pre style="white-space:pre;overflow-x:auto;line-height:normal;font-family:Menlo,'DejaVu Sans Mono',consolas,'Courier New',monospace">┏━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">              </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">            </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Compressed </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">             </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">   Compressed </span>┃
-┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Title        </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Compression </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Parquet CDC </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Total Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">    Chunk Size </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold"> Dedup Ratio </span>┃<span style="color: #800080; text-decoration-color: #800080; font-weight: bold">  Dedup Ratio </span>┃
+┃              ┃             ┃             ┃            ┃            ┃    Compressed ┃             ┃   Compressed ┃
+┃ Title        ┃ Compression ┃ Parquet CDC ┃ Total Size ┃ Chunk Size ┃    Chunk Size ┃ Dedup Ratio ┃  Dedup Ratio ┃
 ┡━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━━━━━━━┩
 │ hermes-2.5-… │ none        │ cdc         │    2.9 GiB │    1.5 GiB │     796.2 MiB │         51% │          26% │
 │ hermes-2.5-… │ none        │ nocdc       │    2.9 GiB │    1.7 GiB │     913.6 MiB │         59% │          30% │
@@ -1118,14 +1085,11 @@ ratio will drop significantly.
 
 ## References
 
-More details about the feature can be found at: - [Hugging Face’s Xet
-announcement](https://huggingface.co/blog/xet-on-the-hub) -
-[parquet-dedupe-estimator’s
-readme](https://github.com/huggingface/dataset-dedupe-estimator) -
-[PyArrow’s documentation
-page](https://arrow.apache.org/docs/dev/python/parquet.html#content-defined-chunking) -
-[Pull request implementing Parquet
-CDC](https://github.com/apache/arrow/pull/45360)
+More details about the feature can be found at: 
+- [Hugging Face’s Xet announcement](https://huggingface.co/blog/xet-on-the-hub) 
+- [parquet-dedupe-estimator’s readme](https://github.com/huggingface/dataset-dedupe-estimator) 
+- [PyArrow’s documentation page](https://arrow.apache.org/docs/dev/python/parquet.html#content-defined-chunking) 
+- [Pull request implementing Parquet CDC](https://github.com/apache/arrow/pull/45360)
 
 ## Conclusion
 
