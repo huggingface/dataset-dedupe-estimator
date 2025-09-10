@@ -6,7 +6,9 @@ from pathlib import Path
 import pyarrow.parquet as pq
 
 
-def rewrite_to_parquet(src_path, dest_path, block_size=1024 * 1024, **kwargs):
+def rewrite_to_parquet(
+    src_path, dest_path, block_size=1024 * 1024, row_group_size=None, **kwargs
+):
     """
     Reads a Parquet file in blocks and writes them out to another file.
 
@@ -21,7 +23,7 @@ def rewrite_to_parquet(src_path, dest_path, block_size=1024 * 1024, **kwargs):
         schema = src.schema.to_arrow_schema()
         writer = pq.ParquetWriter(dest_path, schema, **kwargs)
         for batch in src.iter_batches(batch_size=block_size):
-            writer.write(batch, row_group_size=1024 * 1024)
+            writer.write(batch, row_group_size=row_group_size)
         writer.close()
 
     src = pq.ParquetFile(src_path)

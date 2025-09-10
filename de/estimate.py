@@ -33,9 +33,15 @@ def estimate_xtool(paths):
             tmp.name,
             *map(str, paths),
         ]
-        result = subprocess.run(
-            cmd, check=True, capture_output=True, text=True, env=env
-        )
+        try:
+            result = subprocess.run(
+                cmd, check=True, capture_output=True, text=True, env=env
+            )
+        except subprocess.CalledProcessError as e:
+            print("Command failed with exit code", e.returncode)
+            print("stdout:", e.stdout)
+            print("stderr:", e.stderr)
+            raise
 
     # stderr looks like:
     # 'Dedupping 26 files...\nUsing lz4 compression\n\n\nClean results:\nTransmitted 3180990288 bytes in total.\n'

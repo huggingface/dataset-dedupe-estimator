@@ -12,8 +12,8 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from tqdm.contrib.concurrent import process_map
 from humanize import naturalsize
+import plotly.io as pio
 import plotly.graph_objects as go
-
 
 from .estimate import estimate_de, estimate_xtool
 from .fileutils import (
@@ -30,6 +30,9 @@ from .synthetic import (
     write_and_compare_sqlite,
     pretty_print_stats,
 )
+
+
+pio.renderers.default = "browser"  # Opens in a new browser tab
 
 
 def pyarrow_has_cdc():
@@ -200,10 +203,11 @@ def revisions(files, target_dir):
 )
 @click.option(
     "--data-page-size",
-    default=1024 * 1024,
+    default=None,
     help="Parquet data page size in bytes",
     type=int,
 )
+@click.option("--row-group-size", default=None, help="Parquet row group size", type=int)
 @click.option("--cdc-norm-level", default=0, help="CDC normalization level", type=int)
 @click.option(
     "--max-processes",
@@ -227,6 +231,7 @@ def stats(
     cdc_max_size,
     cdc_norm_level,
     data_page_size,
+    row_group_size,
     max_processes,
 ):
     # go over all the parquet files in the directory, read them, generate a cdc
@@ -257,6 +262,7 @@ def stats(
         },
         "use_dictionary": not disable_dictionary,
         "data_page_size": data_page_size,
+        "row_group_size": row_group_size,
     }
     if not (skip_rewrite or skip_parquet_rewrite or skip_zstd):
         print("Writing CDC Parquet files with ZSTD compression")
@@ -291,19 +297,27 @@ def stats(
     ]
     inputs = {}
     if with_json:
-        inputs["JSONLines"] = json_files
+        inputs[("JSONLines", "none", "nocdc")] = json_files
     if with_sqlite:
-        inputs["SQLite"] = sqlite_files
-    inputs["Parquet"] = files
+        inputs[("SQLite", "none", "nocdc")] = sqlite_files
+    inputs[("Parquet", "none", "nocdc")] = files
     if not skip_zstd:
-        inputs["CDC ZSTD"] = cdc_zstd_files
+        inputs[("CDC ZSTD", "zstd", "cdc")] = cdc_zstd_files
     if not skip_snappy:
-        inputs["CDC Snappy"] = cdc_snappy_files
+        inputs[("CDC Snappy", "snappy", "cdc")] = cdc_snappy_files
 
     results = []
-    for title, paths in inputs.items():
-        print(f"Estimating deduplication for {title}")
-        results.append({"title": title, **estimate_de(paths), **estimate_xtool(paths)})
+    for (edit, compression, kind), paths in inputs.items():
+        print(f"Estimating deduplication for {edit}")
+        results.append(
+            {
+                "edit": edit,
+                "compression": compression,
+                "kind": kind,
+                **estimate_de(paths),
+                **estimate_xtool(paths),
+            }
+        )
     pretty_print_stats(results)
 
     # plot the results using plotly with bars grouped by metric
@@ -317,7 +331,7 @@ def stats(
         data=[
             go.Bar(
                 name=column_title,
-                x=[r["title"] for r in results],
+                x=[r["edit"] for r in results],
                 y=[r[y_keys[i]] for r in results],
             )
             for i, column_title in enumerate(column_titles)
@@ -504,6 +518,7 @@ def param_impact(file, directory, row_group_size, data_page_size):
     )
 
     fig = go.Figure()
+
     fig.add_trace(
         go.Scatter(
             x=param_values,
@@ -529,4 +544,11 @@ def param_impact(file, directory, row_group_size, data_page_size):
         legend=dict(title="Metric"),
         template="plotly_white",
     )
+
+    # Write HTML for later viewing
+    output_html = f"{param_name}_dedup_ratio.html"
+    fig.write_html(str(output_html), include_plotlyjs="cdn")
+    click.echo(f"Wrote figure to {output_html}")
+
+    # Show interactive window
     fig.show()
