@@ -44,9 +44,9 @@ class TestSyntheticCommand:
         assert result.exit_code == 0, result.output
         rows = capture_results["results"]
         assert len(rows) > 0
-        assert all("format" in r for r in rows)
-        assert all("dedup_ratio" in r for r in rows)
-        assert all(0 < r["dedup_ratio"] <= 1 for r in rows)
+        assert all(hasattr(r, "format") for r in rows)
+        assert all(hasattr(r, "dedup_ratio") for r in rows)
+        assert all(0 < r.dedup_ratio <= 1 for r in rows)
 
     def test_variants_present(self, runner, tmp_path, capture_results):
         runner.invoke(
@@ -63,7 +63,7 @@ class TestSyntheticCommand:
                 '{"a": "int"}',
             ],
         )
-        variants = {r["variant"] for r in capture_results["results"]}
+        variants = {r.group for r in capture_results["results"]}
         assert len(variants) > 1
 
     def test_multi_column_schema(self, runner, tmp_path, capture_results):
@@ -83,6 +83,54 @@ class TestSyntheticCommand:
         )
         assert result.exit_code == 0, result.output
         assert len(capture_results["results"]) > 0
+
+
+class TestParamImpactCommand:
+    @pytest.fixture
+    def parquet_file(self, tmp_path):
+        table = pa.table({"a": list(range(1000)), "b": ["x"] * 1000})
+        path = tmp_path / "input.parquet"
+        pq.write_table(table, path)
+        return path
+
+    def test_row_group_size(self, runner, tmp_path, parquet_file):
+        result = runner.invoke(
+            cli,
+            ["param-impact", str(parquet_file), str(tmp_path), "--row-group-size"],
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_data_page_size(self, runner, tmp_path, parquet_file):
+        result = runner.invoke(
+            cli,
+            ["param-impact", str(parquet_file), str(tmp_path), "--data-page-size"],
+        )
+        assert result.exit_code == 0, result.output
+
+    def test_no_flag_exits_with_error(self, runner, tmp_path, parquet_file):
+        result = runner.invoke(
+            cli,
+            ["param-impact", str(parquet_file), str(tmp_path)],
+        )
+        assert result.exit_code != 0
+
+    def test_plot_shown_with_flag(self, runner, tmp_path, parquet_file, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "de.cli.display.plot_bars", lambda *a, **kw: calls.append(a)
+        )
+        result = runner.invoke(
+            cli,
+            [
+                "--plot",
+                "param-impact",
+                str(parquet_file),
+                str(tmp_path),
+                "--row-group-size",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert len(calls) == 1
 
 
 class TestStatsCommand:
@@ -105,9 +153,9 @@ class TestStatsCommand:
         assert result.exit_code == 0, result.output
         rows = capture_results["results"]
         assert len(rows) > 0
-        assert all("format" in r for r in rows)
-        assert all("dedup_ratio" in r for r in rows)
-        assert all(r["numfiles"] == 2 for r in rows)
+        assert all(hasattr(r, "format") for r in rows)
+        assert all(hasattr(r, "dedup_ratio") for r in rows)
+        assert all(r.numfiles == 2 for r in rows)
 
     def test_with_row_group_size(self, runner, parquet_dir, capture_results):
         result = runner.invoke(

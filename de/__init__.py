@@ -3,35 +3,26 @@ import glob
 import humanize
 
 from .core import chunks
-from .estimate import estimate_de, estimate_xet
 from .display import print_table
 from .formats import ParquetCpp
-from .estimate import compare_formats_tables, compare_formats
+from .estimate import estimate as _estimate, compare_formats_tables, compare_formats
 
 __all__ = [
     "chunks",
     "compare_formats_tables",
     "compare_formats",
     "estimate",
-    "estimate_de",
-    "estimate_xet",
     "visualize",
 ]
 
 
-def estimate(*patterns, xet=False):
+def estimate(*patterns):
     """Estimate the deduplication size of the given paths."""
     paths = sum([glob.glob(pattern) for pattern in patterns], [])
-
-    de_result = estimate_de(paths)
-    print(f"Total size: {humanize.naturalsize(de_result['total_len'])}")
-    print(f"Chunk size: {humanize.naturalsize(de_result['chunk_bytes'])}")
-
-    if xet:
-        xet_result = estimate_xet(paths)
-        print(
-            f"Transmitted size (xet): {humanize.naturalsize(xet_result['transmitted_xet_bytes'])}"
-        )
+    result = _estimate(paths)
+    print(f"Total size: {humanize.naturalsize(result['total_len'])}")
+    print(f"Chunk size: {humanize.naturalsize(result['chunk_bytes'])}")
+    print(f"Transmitted size (xet): {humanize.naturalsize(result['xet_bytes'])}")
 
 
 _without_cdc_markdown_header = """

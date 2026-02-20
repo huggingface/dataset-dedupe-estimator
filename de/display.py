@@ -29,57 +29,57 @@ def ratio_cell(ratio: float, numfiles: int, width: int = 20, style=None) -> Tabl
     return grid
 
 
-def print_table(results: list[dict]) -> None:
+def print_table(results: list) -> None:
     """Display results as a Rich formatted table."""
-    has_xet = "xet_bytes" in results[0]
+    has_xet = results[0].xet_bytes is not None
 
-    results = sorted(results, key=lambda r: (r["variant"], r["dedup_ratio"]))
+    results = sorted(results, key=lambda r: (r.group, r.dedup_ratio))
 
     best_ratio: dict[str, float] = {}
     for row in results:
-        g = row["variant"]
-        r = round(row["dedup_ratio"], 2)
+        g = row.group
+        r = round(row.dedup_ratio, 2)
         if g not in best_ratio or r < best_ratio[g]:
             best_ratio[g] = r
 
     console = Console()
     table = Table(show_header=True, header_style="bold magenta")
-    table.add_column("Variant", justify="left")
+    table.add_column("Group", justify="left")
     table.add_column("Format", justify="left")
     table.add_column("Params", justify="left")
     table.add_column("Total Size", justify="right")
     table.add_column("Chunk Size", justify="right")
-    table.add_column("Deduped Size Ratio", justify="left")
+    table.add_column("Deduped Ratio", justify="left")
     if has_xet:
-        table.add_column("Xet Bytes", justify="right")
-        table.add_column("Xet Deduped Size Ratio", justify="left")
+        table.add_column("Xet Size", justify="right")
+        table.add_column("Xet Deduped Ratio", justify="left")
 
     prev_group = None
     for row in results:
-        group = row["variant"]
+        group = row.group
         is_first_in_group = group != prev_group
         if is_first_in_group:
             table.add_section()
             prev_group = group
 
-        ratio = round(row["dedup_ratio"], 2)
+        ratio = round(row.dedup_ratio, 2)
         is_best = ratio == best_ratio[group]
         style = "bold green" if is_best else ""
 
         values = [
-            row["variant"] if is_first_in_group else "",
-            Text(row["format"], style=style),
-            Text(row["params"], style=style),
-            Text(naturalsize(row["total_len"], binary=True), style=style),
-            Text(naturalsize(row["chunk_bytes"], binary=True), style=style),
-            ratio_cell(ratio, row["numfiles"], style=style),
+            row.group if is_first_in_group else "",
+            Text(row.format.name, style=style),
+            Text(row.format.paramstem, style=style),
+            Text(naturalsize(row.total_len, binary=True), style=style),
+            Text(naturalsize(row.chunk_bytes, binary=True), style=style),
+            ratio_cell(ratio, row.numfiles, style=style),
         ]
         if has_xet:
-            xet_ratio = round(row["xet_dedup_ratio"], 2)
+            xet_ratio = round(row.xet_dedup_ratio, 2)
             values.extend(
                 [
-                    Text(naturalsize(row["xet_bytes"], binary=True), style=style),
-                    ratio_cell(xet_ratio, row["numfiles"], style=style),
+                    Text(naturalsize(row.xet_bytes, binary=True), style=style),
+                    ratio_cell(xet_ratio, row.numfiles, style=style),
                 ]
             )
 
@@ -88,68 +88,49 @@ def print_table(results: list[dict]) -> None:
     console.print(table)
 
 
-def plot_bars(results: list[dict]) -> None:
-    """Display deduplication ratios per format, sorted best to worst."""
-    multi_variant = len(set(r["variant"] for r in results)) > 1
+def plot_bars(results: list, output_html: str | None = None) -> None:
+    """Display deduplication ratios as horizontal grouped bars: format on y, params as series."""
+    groups = sorted(set(r.group for r in results))
+    params_list = sorted(set(r.format.paramstem for r in results))
+    multi_group = len(groups) > 1
 
-    def label(r):
-        base = f"{r['format']} {r['params']}".strip()
-        return f"{r['variant']} / {base}" if multi_variant else base
+    def fmt_key(r):
+        return f"{r.format.name} ({r.group})" if multi_group else r.format.name
 
-    sorted_results = sorted(results, key=lambda r: r["chunk_bytes"] / r["total_len"])
-    ratios = [r["chunk_bytes"] / r["total_len"] for r in sorted_results]
-    x_labels = [label(r) for r in sorted_results]
+    # Sort formats by best ratio; reversed so best appears at top
+    format_best = {}
+    for r in results:
+        k = fmt_key(r)
+        if k not in format_best or r.dedup_ratio < format_best[k]:
+            format_best[k] = r.dedup_ratio
+    sorted_formats = sorted(format_best, key=lambda f: format_best[f], reverse=True)
 
-    fig = go.Figure(
-        go.Bar(
-            x=x_labels,
-            y=ratios,
-            text=[f"{v:.1%}" for v in ratios],
-            textposition="outside",
-        )
-    )
+    by_key = {(fmt_key(r), r.format.paramstem): r.dedup_ratio for r in results}
 
-    # Zoom into the meaningful range: just below the best result
-    y_min = max(0, min(ratios) - 0.1)
-    fig.update_layout(
-        yaxis=dict(
-            tickformat=".0%",
-            title="Chunk ratio (lower = better dedup)",
-            range=[y_min, 1.08],
-        ),
-        xaxis_title="Format",
-        template="plotly_white",
-        showlegend=False,
-    )
-    fig.show()
-
-
-def plot_lines(
-    x_values,
-    y_series: dict[str, list],
-    x_label: str,
-    y_label: str = "Deduplication Ratio",
-    output_html: str | None = None,
-) -> None:
-    """Display y_series as line+marker traces against x_values."""
-    markers = ["circle", "square", "diamond", "cross"]
     fig = go.Figure()
-    for i, (name, y_values) in enumerate(y_series.items()):
+    for params in params_list:
+        ratios = [by_key.get((fmt, params)) for fmt in sorted_formats]
         fig.add_trace(
-            go.Scatter(
-                x=x_values,
-                y=y_values,
-                mode="lines+markers",
-                name=name,
-                marker=dict(symbol=markers[i % len(markers)]),
+            go.Bar(
+                name=params or "default",
+                y=sorted_formats,
+                x=ratios,
+                orientation="h",
+                text=[f"{v:.1%}" if v is not None else "" for v in ratios],
+                textposition="outside",
             )
         )
+
     fig.update_layout(
-        title=f"{y_label} vs {x_label}",
-        xaxis=dict(title=x_label, type="log", dtick=1, tickformat=".2s"),
-        yaxis=dict(title=y_label, tickformat=".2%"),
-        legend=dict(title="Metric"),
+        barmode="group",
+        xaxis=dict(
+            tickformat=".0%",
+            title="Dedup ratio (lower = better)",
+            range=[0, 1.0],
+        ),
         template="plotly_white",
+        showlegend=len(params_list) > 1 or multi_group,
+        height=max(300, len(sorted_formats) * 80 + 100),
     )
     if output_html:
         fig.write_html(output_html, include_plotlyjs="cdn")
