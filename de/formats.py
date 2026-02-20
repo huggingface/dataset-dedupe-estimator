@@ -154,7 +154,9 @@ class JsonLines(FileFormat):
     def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
         path = self.derive_path(name, directory)
         table = pq.read_table(src) if isinstance(src, Path) else src
-        table.to_pandas().to_json(path, orient="records", lines=True, compression=self.compression)
+        table.to_pandas().to_json(
+            path, orient="records", lines=True, compression=self.compression
+        )
         return path
 
 

@@ -45,7 +45,10 @@ class TestEstimateDe:
 
 class TestCompareFormatsTables:
     def test_one_record_per_format_per_variant(self, tmp_path, table, edit):
-        formats = [ParquetCpp(use_cdc=False), ParquetCpp(use_cdc=False, compression="zstd")]
+        formats = [
+            ParquetCpp(use_cdc=False),
+            ParquetCpp(use_cdc=False, compression="zstd"),
+        ]
         results = compare_formats_tables(
             formats,
             {"edit1": {"original": table, "edit1": edit}},

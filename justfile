@@ -3,6 +3,7 @@ fmt:
     cargo fmt
 
 lint:
+    uv run ruff format --check de
     uv run ruff check de
     cargo fmt --check
     cargo check
