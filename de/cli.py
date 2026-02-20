@@ -1,59 +1,30 @@
 import json
 
-import functools
-
 from pathlib import Path
 import sys
-import tempfile
 
 import click
 import numpy as np
-import pyarrow as pa
 import pyarrow.parquet as pq
-from tqdm.contrib.concurrent import process_map
+
 from humanize import naturalsize
 import plotly.io as pio
 import plotly.graph_objects as go
 
-from .estimate import estimate_de, estimate_xtool
-from .fileutils import (
-    rewrite_to_parquet,
-    rewrite_to_jsonlines,
-    rewrite_to_sqlite,
-    checkout_file_revisions,
-    get_page_chunk_sizes,
-)
-from .synthetic import (
-    FakeDataGenerator,
-    write_and_compare_parquet,
-    write_and_compare_json,
-    write_and_compare_sqlite,
-    pretty_print_stats,
-)
+from . import display
+from .estimate import estimate_de, estimate_xet
+from .fileutils import checkout_file_revisions, get_page_chunk_sizes
+from .formats import ParquetCpp, ParquetRs, JsonLines, Sqlite, CdcParams
+from .estimate import compare_formats_tables, compare_formats
+from .synthetic import DataGenerator
 
 
 pio.renderers.default = "browser"  # Opens in a new browser tab
 
 
-def pyarrow_has_cdc():
-    # check that pyarrow is compoiled with cdc support
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp_dir = Path(temp_dir)
-        table = pa.table({"id": [1, 2, 3, 4, 5]})
-        try:
-            pq.write_table(
-                table, temp_dir / "test.parquet", use_content_defined_chunking=True
-            )
-        except TypeError:
-            return False
-    return True
-
-
 @click.group()
 def cli():
-    if not pyarrow_has_cdc():
-        click.echo("PyArrow is not compiled with CDC support.", err=True)
-        sys.exit(1)
+    pass
 
 
 @cli.command()
@@ -85,6 +56,9 @@ def cli():
     "--cdc-max-size", default=1024, help="Maximum CDC chunk size in KiB", type=int
 )
 @click.option("--cdc-norm-level", default=0, help="CDC normalization level", type=int)
+@click.option(
+    "--no-sanity-check", is_flag=True, help="Skip sanity check after writing files"
+)
 def synthetic(
     schema,
     size,
@@ -97,6 +71,7 @@ def synthetic(
     cdc_min_size,
     cdc_max_size,
     cdc_norm_level,
+    no_sanity_check,
 ):
     """Generate synthetic data and compare the deduplication ratios.
     de synthetic -s 1 -e 1 '{"a": "int"}'
@@ -115,54 +90,53 @@ def synthetic(
     edit_points = np.linspace(0.5 / num_edits, 1 - 0.5 / num_edits, num_edits)
     schema = json.loads(schema)
 
-    gen = FakeDataGenerator(schema, seed=42)
+    gen = DataGenerator(schema, seed=42)
     original, tables = gen.generate_synthetic_tables(
         size=size * 2**20,
         edit_size=edit_size,
         edit_points=list(edit_points),
         append_ratio=0.05,
-        update_columns={k: [k] for k in schema.keys()},
+        update_columns=list(schema.keys()),
     )
+
+    cdc_params = CdcParams(
+        min_chunk_size=cdc_min_size * 1024,
+        max_chunk_size=cdc_max_size * 1024,
+        norm_level=cdc_norm_level,
+    )
+    formats = [
+        ParquetCpp(use_cdc=False, compression="snappy", use_dictionary=use_dictionary),
+        ParquetCpp(use_cdc=False, compression="zstd", use_dictionary=use_dictionary),
+        ParquetCpp(
+            use_cdc=cdc_params,
+            compression="snappy",
+            use_dictionary=use_dictionary,
+        ),
+        ParquetCpp(
+            use_cdc=cdc_params,
+            compression="zstd",
+            use_dictionary=use_dictionary,
+        ),
+        ParquetRs(use_cdc=False, compression="snappy"),
+        ParquetRs(use_cdc=False, compression="zstd"),
+        ParquetRs(use_cdc=True, compression="snappy"),
+        ParquetRs(use_cdc=True, compression="zstd"),
+    ]
+    if with_json:
+        formats += [JsonLines("none"), JsonLines("zstd")]
+    if with_sqlite:
+        formats.append(Sqlite())
 
     prefix = f"s{size}c{len(schema)}e{num_edits}"
-    cdc_params = {
-        "min_chunk_size": cdc_min_size * 1024,
-        "max_chunk_size": cdc_max_size * 1024,
-        "norm_level": cdc_norm_level,
+    variants = {
+        f"{prefix}-{name}": {"original": original, name: edit_table}
+        for name, edit_table in tables.items()
     }
-
-    print("Writing Parquet files without CDC")
-    results = write_and_compare_parquet(
-        directory,
-        original,
-        tables,
-        prefix=prefix,
-        postfix="nocdc",
-        use_content_defined_chunking=False,
-        use_dictionary=use_dictionary,
+    results = compare_formats_tables(
+        formats, variants, directory, sanity_check=not no_sanity_check
     )
 
-    print("Writing Parquet files with CDC")
-    results += write_and_compare_parquet(
-        directory,
-        original,
-        tables,
-        prefix=prefix,
-        postfix="cdc",
-        use_content_defined_chunking=cdc_params,
-        use_dictionary=use_dictionary,
-        # data_page_size=100 * 1024 * 1024,
-    )
-
-    if with_json:
-        print("Writing JSONLines files")
-        results += write_and_compare_json(directory, original, tables, prefix=prefix)
-
-    if with_sqlite:
-        print("Writing SQLite files")
-        results += write_and_compare_sqlite(directory, original, tables, prefix=prefix)
-
-    pretty_print_stats(results)
+    display.print_table(results)
 
 
 @cli.command()
@@ -174,194 +148,108 @@ def synthetic(
     type=click.Path(file_okay=False, writable=True),
     required=True,
 )
-def revisions(files, target_dir):
+@click.option("--from-rev", default=None, help="Start of revision range (exclusive)")
+@click.option(
+    "--until-rev",
+    default="HEAD",
+    help="End of revision range (inclusive, default: HEAD)",
+)
+def revisions(files, target_dir, from_rev, until_rev):
     """Checkout all revisions of the given files and calculate the deduplication ratio."""
     target_dir = Path("revisions") if target_dir is None else Path(target_dir)
     target_dir.mkdir(exist_ok=True)
     for file_path in files:
-        checkout_file_revisions(file_path, target_dir=target_dir)
+        checkout_file_revisions(
+            file_path, target_dir=target_dir, from_rev=from_rev, until_rev=until_rev
+        )
 
 
 @cli.command()
 @click.argument("directory", type=click.Path(exists=True, file_okay=False))
 @click.option("--with-json", is_flag=True, help="Also calculate JSONLines stats")
 @click.option("--with-sqlite", is_flag=True, help="Also calculate SQLite stats")
-@click.option("--skip-zstd", is_flag=True, help="Skip ZSTD rewrite")
-@click.option("--skip-snappy", is_flag=True, help="Skip Snappy rewrite")
-@click.option("--skip-rewrite", is_flag=True, help="Skip file rewriting")
-@click.option("--skip-json-rewrite", is_flag=True, help="Skip JSON rewrite")
-@click.option("--skip-sqlite-rewrite", is_flag=True, help="Skip SQLite rewrite")
-@click.option("--skip-parquet-rewrite", is_flag=True, help="Skip Parquet rewrite")
-@click.option(
-    "--disable-dictionary", is_flag=True, help="Disallow parquet dictionary encoding"
-)
 @click.option(
     "--cdc-min-size", default=256, help="Minimum CDC chunk size in KiB", type=int
 )
 @click.option(
     "--cdc-max-size", default=1024, help="Maximum CDC chunk size in KiB", type=int
 )
-@click.option(
-    "--data-page-size",
-    default=None,
-    help="Parquet data page size in bytes",
-    type=int,
-)
-@click.option("--row-group-size", default=None, help="Parquet row group size", type=int)
 @click.option("--cdc-norm-level", default=0, help="CDC normalization level", type=int)
 @click.option(
-    "--max-processes",
-    "-p",
-    default=None,
-    type=int,
-    help="Maximum number of processes to use",
+    "--data-page-size", default=None, help="Parquet data page size in bytes", type=int
+)
+@click.option("--row-group-size", default=None, help="Parquet row group size", type=int)
+@click.option(
+    "--no-sanity-check", is_flag=True, help="Skip sanity check after writing files"
 )
 def stats(
     directory,
     with_json,
     with_sqlite,
-    skip_zstd,
-    skip_snappy,
-    skip_rewrite,
-    skip_json_rewrite,
-    skip_sqlite_rewrite,
-    skip_parquet_rewrite,
-    disable_dictionary,
     cdc_min_size,
     cdc_max_size,
     cdc_norm_level,
     data_page_size,
     row_group_size,
-    max_processes,
+    no_sanity_check,
 ):
-    # go over all the parquet files in the directory, read them, generate a cdc
-    # enabled version and compare the deduplication ratios of all the files
-    # written without and with CDC
-    files = [
-        path for path in Path(directory).rglob("*.parquet") if "cdc" not in path.name
-    ]
-    json_files = [path.with_name(path.stem + ".jsonlines") for path in files]
-    sqlite_files = [path.with_name(path.stem + ".sqlite") for path in files]
-    cdc_zstd_files = [path.with_name(path.stem + "-zstd-cdc.parquet") for path in files]
-    cdc_snappy_files = [
-        path.with_name(path.stem + "-snappy-cdc.parquet") for path in files
-    ]
+    """Compare deduplication ratios across formats for parquet files in a directory."""
+    directory = Path(directory)
+    files = sorted(directory.glob("*.parquet"))
 
-    if with_json and not (skip_rewrite or skip_json_rewrite):
-        print("Writing JSONLines files")
-        process_map(rewrite_to_jsonlines, files, json_files)
-    if with_sqlite and not (skip_rewrite or skip_sqlite_rewrite):
-        print("Writing SQLite files")
-        process_map(rewrite_to_sqlite, files, sqlite_files)
+    tables = {"combined": {p.stem: p for p in files}}
 
-    kwargs = {
-        "use_content_defined_chunking": {
-            "min_chunk_size": cdc_min_size * 1024,
-            "max_chunk_size": cdc_max_size * 1024,
-            "norm_level": cdc_norm_level,
-        },
-        "use_dictionary": not disable_dictionary,
-        "data_page_size": data_page_size,
-        "row_group_size": row_group_size,
-    }
-    if not (skip_rewrite or skip_parquet_rewrite or skip_zstd):
-        print("Writing CDC Parquet files with ZSTD compression")
-        if max_processes == 1:
-            for src_path, dst_path in zip(files, cdc_zstd_files):
-                rewrite_to_parquet(src_path, dst_path, compression="snappy", **kwargs)
-        else:
-            process_map(
-                functools.partial(rewrite_to_parquet, compression="zstd", **kwargs),
-                files,
-                cdc_zstd_files,
-                max_workers=max_processes,
-            )
-    if not (skip_rewrite or skip_parquet_rewrite or skip_snappy):
-        print("Writing CDC Parquet files with Snappy compression")
-        if max_processes == 1:
-            for src_path, dst_path in zip(files, cdc_snappy_files):
-                rewrite_to_parquet(src_path, dst_path, compression="snappy", **kwargs)
-        else:
-            process_map(
-                functools.partial(rewrite_to_parquet, compression="snappy", **kwargs),
-                files,
-                cdc_snappy_files,
-                max_workers=max_processes,
-            )
-
-    column_titles = [
-        "Total Bytes",
-        "Chunk Bytes",
-        "Compressed Chunk Bytes",
-        "Transmitted XTool Bytes",
-    ]
-    inputs = {}
-    if with_json:
-        inputs[("JSONLines", "none", "nocdc")] = json_files
-    if with_sqlite:
-        inputs[("SQLite", "none", "nocdc")] = sqlite_files
-    inputs[("Parquet", "none", "nocdc")] = files
-    if not skip_zstd:
-        inputs[("CDC ZSTD", "zstd", "cdc")] = cdc_zstd_files
-    if not skip_snappy:
-        inputs[("CDC Snappy", "snappy", "cdc")] = cdc_snappy_files
-
-    results = []
-    for (edit, compression, kind), paths in inputs.items():
-        print(f"Estimating deduplication for {edit}")
-        results.append(
-            {
-                "edit": edit,
-                "compression": compression,
-                "kind": kind,
-                **estimate_de(paths),
-                **estimate_xtool(paths),
-            }
-        )
-    pretty_print_stats(results)
-
-    # plot the results using plotly with bars grouped by metric
-    y_keys = [
-        "total_len",
-        "chunk_bytes",
-        "compressed_chunk_bytes",
-        "transmitted_xtool_bytes",
-    ]
-    fig = go.Figure(
-        data=[
-            go.Bar(
-                name=column_title,
-                x=[r["edit"] for r in results],
-                y=[r[y_keys[i]] for r in results],
-            )
-            for i, column_title in enumerate(column_titles)
-        ]
+    cdc_params = CdcParams(
+        min_chunk_size=cdc_min_size * 1024,
+        max_chunk_size=cdc_max_size * 1024,
+        norm_level=cdc_norm_level,
     )
-    fig.update_layout(barmode="group", yaxis=dict(tickformat=".2s", title="Bytes"))
-    fig.show()
+    params = dict(
+        data_page_size=data_page_size,
+        row_group_size=row_group_size,
+    )
+    formats = [
+        ParquetCpp(use_cdc=False, compression="snappy", **params),
+        ParquetCpp(use_cdc=cdc_params, compression="snappy", **params),
+        ParquetRs(use_cdc=False, compression="snappy"),
+        ParquetRs(use_cdc=True, compression="snappy"),
+    ]
+    if with_json:
+        formats.insert(0, JsonLines())
+    if with_sqlite:
+        formats.insert(0, Sqlite())
+
+    results = compare_formats_tables(
+        formats,
+        tables,
+        directory,
+        sanity_check=not no_sanity_check,
+    )
+    display.print_table(results)
+    display.plot_bars(results)
 
 
 @cli.command()
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
 def dedup(files):
     result_de = estimate_de(files)
-    result_xtool = estimate_xtool(files)
+    result_xet = estimate_xet(files)
     dedup_ratio = result_de["chunk_bytes"] / result_de["total_len"]
     print(
         f"Deduplication ratio: {dedup_ratio:.2%} ({naturalsize(result_de['chunk_bytes'])} / {naturalsize(result_de['total_len'])})"
     )
     print(
-        f"XTool deduplication ratio: {result_xtool['transmitted_xtool_bytes'] / result_de['total_len']:.2%} ({naturalsize(result_xtool['transmitted_xtool_bytes'])} / {naturalsize(result_de['total_len'])})"
+        f"Xet deduplication ratio: {result_xet['transmitted_xet_bytes'] / result_de['total_len']:.2%} ({naturalsize(result_xet['transmitted_xet_bytes'])} / {naturalsize(result_de['total_len'])})"
     )
 
 
 @cli.command()
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
 def rewrite(files):
+    fmt = ParquetCpp(use_cdc=True)
     for path in files:
         path = Path(path)
-        out = path.with_name(path.stem + "-dedup.parquet")
-        rewrite_to_parquet(path, out, use_content_defined_chunking=True)
+        fmt.write(path.stem + "-dedup", path, path.parent)
 
 
 @cli.command()
@@ -410,70 +298,6 @@ def page_chunks(patterns):
     fig.show()
 
 
-def calculate_parameter_impact(
-    path, directory, param_name, param_values, param_default
-):
-    # calculate the impact of a parameter on the deduplication ratio
-    # by rewriting the file with different values of the parameter
-    # and comparing the deduplication ratios
-    directory.mkdir(exist_ok=True)
-    table = pq.read_table(path)
-
-    default_path = directory / f"{param_name}={param_default}.parquet"
-    if not default_path.exists():
-        pq.write_table(
-            table,
-            default_path,
-            use_content_defined_chunking=True,
-            **{param_name: param_default},
-        )
-
-    files = [default_path]
-    results = {}
-    for value in param_values:
-        path = directory / f"{param_name}={value}.parquet"
-        files.append(path)
-        if not path.exists():
-            pq.write_table(
-                table,
-                path,
-                use_content_defined_chunking=True,
-                **{param_name: value},
-            )
-
-        de_result = estimate_de([default_path, path])
-        xtool_result = estimate_xtool([default_path, path])
-
-        result = {
-            "total_len": de_result["total_len"],
-            "chunk_bytes": de_result["chunk_bytes"],
-            "compressed_chunk_bytes": de_result["compressed_chunk_bytes"],
-            "transmitted_xtool_bytes": xtool_result["transmitted_xtool_bytes"],
-            "dedup_ratio": de_result["chunk_bytes"] / de_result["total_len"],
-            "xtool_dedup_ratio": (
-                xtool_result["transmitted_xtool_bytes"] / de_result["total_len"]
-            ),
-        }
-        results[value] = result
-
-    overall_de_result = estimate_de(files)
-    overall_xtool_result = estimate_xtool(files)
-    overall_result = {
-        "total_len": overall_de_result["total_len"],
-        "chunk_bytes": overall_de_result["chunk_bytes"],
-        "compressed_chunk_bytes": overall_de_result["compressed_chunk_bytes"],
-        "transmitted_xtool_bytes": overall_xtool_result["transmitted_xtool_bytes"],
-        "dedup_ratio": overall_de_result["chunk_bytes"]
-        / overall_de_result["total_len"],
-        "xtool_dedup_ratio": (
-            overall_xtool_result["transmitted_xtool_bytes"]
-            / overall_de_result["total_len"]
-        ),
-    }
-
-    return results, overall_result
-
-
 @cli.command
 @click.argument("file", type=Path)
 @click.argument("directory", type=Path)
@@ -485,7 +309,7 @@ def calculate_parameter_impact(
 @click.option(
     "--data-page-size",
     is_flag=True,
-    help="Calculate the impact of max page size on deduplication ratio",
+    help="Calculate the impact of data page size on deduplication ratio",
 )
 def param_impact(file, directory, row_group_size, data_page_size):
     if row_group_size:
@@ -497,58 +321,46 @@ def param_impact(file, directory, row_group_size, data_page_size):
         param_default = 2**20
         param_values = [2**i for i in range(15, 23)]
     else:
-        print("Please specify either --row-group-size or --max-page-size")
+        print("Please specify either --row-group-size or --data-page-size")
         sys.exit(1)
 
-    results, overall_result = calculate_parameter_impact(
-        file, directory, param_name, param_values, param_default
+    directory.mkdir(exist_ok=True)
+    table = pq.read_table(file)
+
+    baseline_fmt = ParquetCpp(
+        use_cdc=True,
+        kind=f"{param_name}={param_default}",
+        **{param_name: param_default},
+    )
+    variant_fmts = [
+        ParquetCpp(use_cdc=True, kind=f"{param_name}={v}", **{param_name: v})
+        for v in param_values
+    ]
+    results = compare_formats(
+        baseline_fmt,
+        variant_fmts,
+        table,
+        directory,
+        metrics=(estimate_de, estimate_xet),
     )
 
-    for param_value, result in results.items():
+    for result, value in zip(results, param_values):
+        dedup = result["chunk_bytes"] / result["total_len"]
+        xet_dedup = result["xet_bytes"] / result["total_len"]
         print(
-            f"{param_name}: {param_value}\n"
-            f"Deduplication ratio: {result['dedup_ratio']:.2%} ({naturalsize(result['chunk_bytes'])} / {naturalsize(result['total_len'])})\n"
-            f"XTool deduplication ratio: {result['xtool_dedup_ratio']:.2%} ({naturalsize(result['transmitted_xtool_bytes'])} / {naturalsize(result['total_len'])})\n"
+            f"{param_name}: {value}\n"
+            f"Deduplication ratio: {dedup:.2%} ({naturalsize(result['chunk_bytes'])} / {naturalsize(result['total_len'])})\n"
+            f"Xet deduplication ratio: {xet_dedup:.2%} ({naturalsize(result['xet_bytes'])} / {naturalsize(result['total_len'])})\n"
         )
 
-    print(f"Overall deduplication ratio over {len(results)} files:")
-    print(
-        f"Overall deduplication ratio: {overall_result['dedup_ratio']:.2%} ({naturalsize(overall_result['chunk_bytes'])} / {naturalsize(overall_result['total_len'])})\n"
-        f"XTool overall deduplication ratio: {overall_result['xtool_dedup_ratio']:.2%} ({naturalsize(overall_result['transmitted_xtool_bytes'])} / {naturalsize(overall_result['total_len'])})\n"
-    )
-
-    fig = go.Figure()
-
-    fig.add_trace(
-        go.Scatter(
-            x=param_values,
-            y=[result["dedup_ratio"] for result in results.values()],
-            mode="lines+markers",
-            name="DE Dedup Ratio",
-            marker=dict(symbol="circle"),
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=param_values,
-            y=[result["xtool_dedup_ratio"] for result in results.values()],
-            mode="lines+markers",
-            name="XTool Dedup Ratio",
-            marker=dict(symbol="square"),
-        )
-    )
-    fig.update_layout(
-        title="Deduplication Ratios vs " + param_name,
-        xaxis=dict(title=param_name, type="log", dtick=1, tickformat=".2s"),
-        yaxis=dict(title="Deduplication Ratio", tickformat=".2%"),
-        legend=dict(title="Metric"),
-        template="plotly_white",
-    )
-
-    # Write HTML for later viewing
     output_html = f"{param_name}_dedup_ratio.html"
-    fig.write_html(str(output_html), include_plotlyjs="cdn")
+    display.plot_lines(
+        x_values=param_values,
+        y_series={
+            "DE Dedup Ratio": [r["chunk_bytes"] / r["total_len"] for r in results],
+            "Xet Dedup Ratio": [r["xet_bytes"] / r["total_len"] for r in results],
+        },
+        x_label=param_name,
+        output_html=output_html,
+    )
     click.echo(f"Wrote figure to {output_html}")
-
-    # Show interactive window
-    fig.show()

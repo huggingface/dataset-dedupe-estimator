@@ -6,23 +6,23 @@ build-backend = "maturin"
 name = "de"
 requires-python = ">=3.8"
 classifiers = [
-    "Programming Language :: Rust",
-    "Programming Language :: Python :: Implementation :: CPython",
-    "Programming Language :: Python :: Implementation :: PyPy",
+  "Programming Language :: Rust",
+  "Programming Language :: Python :: Implementation :: CPython",
+  "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
 dependencies = [
-    "click",
-    "faker",
-    "humanize",
-    "jinja2",
-    "numpy",
-    "pandas",
-    "pillow",
-    "plotly",
-    "pyarrow",
-    "rich",
-    "tqdm",
+  "click",
+  "faker",
+  "humanize",
+  "jinja2",
+  "numpy",
+  "pandas",
+  "pillow",
+  "plotly",
+  "pyarrow",
+  "rich",
+  "tqdm",
 ]
 
 [project.scripts]
@@ -31,3 +31,9 @@ de = "de.cli:cli"
 [tool.maturin]
 module-name = "de.core"
 features = ["pyo3/extension-module"]
+
+[dependency-groups]
+dev = ["mypy>=1.0", "pytest>=8.3.5", "ruff>=0.15.1"]
+
+[tool.mypy]
+ignore_missing_imports = true
