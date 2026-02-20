@@ -38,7 +38,9 @@ class TestParquetCpp:
 
     def test_derive_path_with_compression(self, tmp_path):
         assert (
-            ParquetCpp(use_cdc=False, compression="snappy").derive_path("data", tmp_path)
+            ParquetCpp(use_cdc=False, compression="snappy").derive_path(
+                "data", tmp_path
+            )
             == tmp_path / "data-snappy.parquet"
         )
 
@@ -59,20 +61,28 @@ class TestParquetCpp:
         assert pq.read_table(path).equals(table)
 
     def test_write_with_compression(self, tmp_path, table):
-        path = ParquetCpp(use_cdc=False, compression="snappy").write("out", table, tmp_path)
+        path = ParquetCpp(use_cdc=False, compression="snappy").write(
+            "out", table, tmp_path
+        )
         assert pq.read_metadata(path).row_group(0).column(0).compression == "SNAPPY"
 
     def test_write_with_row_group_size(self, tmp_path):
         big_table = pa.table({"x": list(range(100))})
-        path = ParquetCpp(use_cdc=False, row_group_size=10).write("out", big_table, tmp_path)
+        path = ParquetCpp(use_cdc=False, row_group_size=10).write(
+            "out", big_table, tmp_path
+        )
         assert pq.read_metadata(path).num_row_groups == 10
 
     def test_write_with_data_page_size(self, tmp_path, table):
-        path = ParquetCpp(use_cdc=False, data_page_size=512).write("out", table, tmp_path)
+        path = ParquetCpp(use_cdc=False, data_page_size=512).write(
+            "out", table, tmp_path
+        )
         assert pq.read_table(path).equals(table)
 
     def test_write_without_dictionary(self, tmp_path, table):
-        path = ParquetCpp(use_cdc=False, use_dictionary=False).write("out", table, tmp_path)
+        path = ParquetCpp(use_cdc=False, use_dictionary=False).write(
+            "out", table, tmp_path
+        )
         assert pq.read_table(path).equals(table)
 
     def test_write_from_path_preserves_data(self, tmp_path, table):
@@ -100,10 +110,7 @@ class TestJsonLines:
         assert JsonLines(compression="gzip").paramstem == "gzip"
 
     def test_derive_path(self, tmp_path):
-        assert (
-            JsonLines().derive_path("data", tmp_path)
-            == tmp_path / "data.jsonlines"
-        )
+        assert JsonLines().derive_path("data", tmp_path) == tmp_path / "data.jsonlines"
 
     def test_write_reads_back(self, tmp_path, table):
         path = JsonLines().write("out", table, tmp_path)
