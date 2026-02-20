@@ -1,24 +1,27 @@
 import glob
-from dataclasses import dataclass
 
 from IPython.display import display, Markdown, HTML
 import humanize
 import pyarrow as pa
 
 from .core import chunks
-from .estimate import estimate_de, estimate_xtool
-from .synthetic import write_and_compare_parquet, pretty_print_stats
+from .estimate import estimate_de, estimate_xet
+from .display import print_table
+from .formats import ParquetCpp
+from .estimate import compare_formats_tables, compare_formats
 
 __all__ = [
     "chunks",
+    "compare_formats_tables",
+    "compare_formats",
     "estimate",
     "estimate_de",
-    "estimate_xtool",
+    "estimate_xet",
     "visualize",
 ]
 
 
-def estimate(*patterns, xtool=False):
+def estimate(*patterns, xet=False):
     """Estimate the deduplication size of the given paths."""
     paths = sum([glob.glob(pattern) for pattern in patterns], [])
 
@@ -26,10 +29,10 @@ def estimate(*patterns, xtool=False):
     print(f"Total size: {humanize.naturalsize(de_result['total_len'])}")
     print(f"Chunk size: {humanize.naturalsize(de_result['chunk_bytes'])}")
 
-    if xtool:
-        xtool_result = estimate_xtool(paths)
+    if xet:
+        xet_result = estimate_xet(paths)
         print(
-            f"Transmitted size (xtool): {humanize.naturalsize(xtool_result['transmitted_xtool_bytes'])}"
+            f"Transmitted size (xet): {humanize.naturalsize(xet_result['transmitted_xet_bytes'])}"
         )
 
 
@@ -57,44 +60,33 @@ def visualize(
     compressions=("none", "snappy"),
     **parquet_options,
 ):
-    results = write_and_compare_parquet(
-        directory,
-        original,
-        tables,
-        prefix=prefix,
-        postfix="nocdc",
-        compressions=compressions,
-        use_content_defined_chunking=False,
-        **parquet_options,
-    )
+    formats = [ParquetCpp(c, use_cdc=False, **parquet_options) for c in compressions]
     if with_cdc:
-        results += write_and_compare_parquet(
-            directory,
-            original,
-            tables,
-            prefix=prefix,
-            postfix="cdc",
-            compressions=compressions,
-            use_content_defined_chunking=True,
-            **parquet_options,
-        )
+        formats += [
+            ParquetCpp(c, use_cdc=True, **parquet_options) for c in compressions
+        ]
         header = _with_cdc_markdown_header
     else:
         header = _without_cdc_markdown_header
+    results = compare_formats_tables(
+        formats, {"original": original, **tables}, directory, prefix
+    )
 
     for name in tables.keys():
         markdown_table = header.format(name=name.capitalize())
         for compression in compressions:
+            nocdc_kind = ParquetCpp(compression, use_cdc=False).kind
             row = f"| {compression.capitalize()} "
-            path = f"{prefix}-{compression}-{name.lower()}-nocdc.parquet.png"
+            path = f"{prefix}-{nocdc_kind}-{name.lower()}.parquet.png"
             row += f"| ![Vanilla Parquet {compression}]({path}) "
             if with_cdc:
-                path = f"{prefix}-{compression}-{name.lower()}-cdc.parquet.png"
+                cdc_kind = ParquetCpp(compression, use_cdc=True).kind
+                path = f"{prefix}-{cdc_kind}-{name.lower()}.parquet.png"
                 row += f"| ![CDC Parquet {compression}]({path}) "
             markdown_table += row + "|\n"
         display(Markdown(markdown_table))
 
-    pretty_print_stats(results)
+    print_table(results)
 
 
 def visualize_multidoc_diff(file_paths):

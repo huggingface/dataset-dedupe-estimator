@@ -3,59 +3,13 @@ import subprocess
 import os
 from pathlib import Path
 
-import pyarrow.parquet as pq
 
-
-def rewrite_to_parquet(
-    src_path, dest_path, block_size=1024 * 1024, row_group_size=None, **kwargs
-):
+def checkout_file_revisions(
+    file_path, target_dir, from_rev=None, until_rev="HEAD"
+) -> None:
     """
-    Reads a Parquet file in blocks and writes them out to another file.
-
-    :param src_path: Path to the source Parquet file.
-    :param dest_path: Path to the destination Parquet file.
-    :param block_size: Size of the blocks to read and write in bytes.
-    """
-    src_path = Path(src_path)
-    dest_path = Path(dest_path)
-
-    with pq.ParquetFile(src_path) as src:
-        schema = src.schema.to_arrow_schema()
-        writer = pq.ParquetWriter(dest_path, schema, **kwargs)
-        for batch in src.iter_batches(batch_size=block_size):
-            writer.write(batch, row_group_size=row_group_size)
-        writer.close()
-
-    src = pq.ParquetFile(src_path)
-    dst = pq.ParquetFile(dest_path)
-    src_metadata = src.metadata
-    dst_metadata = dst.metadata
-
-    assert src_metadata.num_rows == dst_metadata.num_rows
-    assert (
-        src_metadata.schema.to_arrow_schema() == dst_metadata.schema.to_arrow_schema()
-    )
-
-
-def rewrite_to_jsonlines(src, dest, **kwargs):
-    table = pq.read_table(src)
-    table.to_pandas().to_json(dest, orient="records", lines=True, **kwargs)
-
-
-def rewrite_to_sqlite(src, dest, **kwargs):
-    """
-    Reads a Parquet file and writes it out to a SQLite database.
-
-    :param src: Path to the source Parquet file.
-    :param dest: Path to the destination SQLite database.
-    """
-    table = pq.read_table(src)
-    table.to_pandas().to_sql(dest.stem, dest, if_exists="replace", **kwargs)
-
-
-def checkout_file_revisions(file_path, target_dir) -> list[str]:
-    """
-    Returns a list of short commit hashes for all revisions of the given file.
+    Checks out all revisions of the given file in the range (from_rev, until_rev].
+    from_rev is exclusive (not included); until_rev is inclusive (defaults to HEAD).
     """
     file_path = Path(file_path)
     target_dir = Path(target_dir)
@@ -74,11 +28,13 @@ def checkout_file_revisions(file_path, target_dir) -> list[str]:
     git_file = file_path.relative_to(git_dir)
     git_cmd = ["git", "-C", str(git_dir)]
     try:
+        revision_range = f"{from_rev}..{until_rev}" if from_rev else until_rev
         command = git_cmd + [
             "log",
             "--pretty=format:%h",
             "--follow",
             "--diff-filter=d",
+            revision_range,
             "--",
             str(git_file),
         ]

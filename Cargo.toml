@@ -15,5 +15,15 @@ lz4_flex = "0.11.3"
 pyo3 = "0.23.3"
 rayon = "1.10.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
-indicatif = {version = "*", features = ["rayon"]}
+indicatif = { version = "*", features = ["rayon"] }
 png = "0.17.16"
+arrow-array = { git = "https://github.com/kszucs/arrow-rs", branch = "content-defined-chunking" }
+parquet = { git = "https://github.com/kszucs/arrow-rs", branch = "content-defined-chunking", default-features = false, features = [
+  "arrow",
+  "snap",
+  "lz4",
+  "zstd",
+  "flate2-zlib-rs",
+] }
+anyhow = "1"
+deduplication = { git = "https://github.com/huggingface/xet-core", rev = "21bc6cfdc3b279cdfd38bb40223ff0b07b28e6d1" }

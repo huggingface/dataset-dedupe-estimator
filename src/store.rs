@@ -97,7 +97,7 @@ impl ChunkStore {
 
     pub fn from_strings(data: &[String], store_data: bool) -> Result<Vec<Self>, std::io::Error> {
         data.iter()
-            .progress_count(data.len() as u64)
+            //.progress_count(data.len() as u64)
             .map(|bytes| ChunkStore::from_stream(&mut bytes.as_bytes(), store_data))
             .collect()
     }
@@ -114,7 +114,7 @@ impl ChunkStore {
     ) -> Result<Vec<Self>, std::io::Error> {
         paths
             .par_iter()
-            .progress_count(paths.len() as u64)
+            //.progress_count(paths.len() as u64)
             .map(|path| ChunkStore::from_file(path, store_data))
             .collect()
     }

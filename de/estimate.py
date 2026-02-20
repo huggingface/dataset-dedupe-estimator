@@ -1,8 +1,13 @@
-import subprocess
-import tempfile
-import os
+from collections import defaultdict
+from pathlib import Path
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .core import estimate
+import pyarrow as pa
+from tqdm import tqdm
+
+from .core import estimate, estimate_xet as _estimate_xet
+from .formats import FileFormat
 
 
 def estimate_de(paths):
@@ -15,35 +20,99 @@ def estimate_de(paths):
     }
 
 
-def estimate_xtool(paths):
-    with tempfile.NamedTemporaryFile(suffix=".json") as tmp:
-        env = os.environ.copy()
-        env["DEFAULT_MIN_N_CHUNKS_PER_RANGE"] = "1"
-        cmd = [
-            "xtool",
-            "--repo-type",
-            "dataset",
-            "--repo-id",
-            "kszucs/pq",
-            "--token",
-            os.environ["XTOOL_TOKEN"],
-            "dedup",
-            "-s",
-            "-o",
-            tmp.name,
-            *map(str, paths),
-        ]
-        try:
-            result = subprocess.run(
-                cmd, check=True, capture_output=True, text=True, env=env
-            )
-        except subprocess.CalledProcessError as e:
-            print("Command failed with exit code", e.returncode)
-            print("stdout:", e.stdout)
-            print("stderr:", e.stderr)
-            raise
+def estimate_xet(paths):
+    xet_bytes = _estimate_xet(list(map(str, paths)))
+    return {"xet_bytes": xet_bytes}
 
-    # stderr looks like:
-    # 'Dedupping 26 files...\nUsing lz4 compression\n\n\nClean results:\nTransmitted 3180990288 bytes in total.\n'
-    transmitted = int(result.stderr.splitlines()[-1].split()[1])
-    return {"transmitted_xtool_bytes": transmitted}
+
+def compare_formats_tables(
+    formats: list[FileFormat],
+    tables: dict[str, dict[str, Path | pa.Table]],
+    directory: Path | str,
+    metrics: tuple[Callable, ...] = (estimate_de, estimate_xet),
+    max_workers: int = None,
+    sanity_check: bool = True,
+) -> list[dict]:
+    """For each format and variant, write/rewrite files and estimate deduplication.
+
+    tables maps variant name -> {name: Path | pa.Table}.
+    Path values: rewrite all files, estimate across the group (one record per
+    (format, variant)). pa.Table values: compare first (original) against second
+    (edit), one record per (format, variant).
+    """
+    directory = Path(directory)
+
+    def compute_metrics(variant, fmt, out_paths):
+        record = {
+            "format": fmt.name,
+            "params": fmt.paramstem,
+            "variant": variant,
+            "numfiles": len(out_paths),
+        }
+        for fn in metrics:
+            record.update(fn([out_paths[k] for k in sorted(out_paths)]))
+        record["dedup_ratio"] = record["chunk_bytes"] / record["total_len"]
+        if "xet_bytes" in record:
+            record["xet_dedup_ratio"] = record["xet_bytes"] / record["total_len"]
+        return record
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all file writes
+        futures = {}
+        for variant, data in tables.items():
+            for fmt in formats:
+                prefix = directory / variant / fmt.name
+                prefix.mkdir(parents=True, exist_ok=True)
+                for name, value in data.items():
+                    f = executor.submit(
+                        fmt.write, name, value, prefix, sanity_check=sanity_check
+                    )
+                    futures[f] = (variant, fmt, name)
+
+        # Collect results as they complete, grouping paths by (fmt, variant)
+        groups = defaultdict(dict)
+        for future in tqdm(as_completed(futures), total=len(futures)):
+            variant, fmt, name = futures[future]
+            groups[(variant, fmt)][name] = future.result()
+
+        # Submit metric computation for each group
+        metric_futures = []
+        for (variant, fmt), out_paths in groups.items():
+            metric_futures.append(
+                executor.submit(compute_metrics, variant, fmt, out_paths)
+            )
+
+        # Collect metric results as they complete
+        records = []
+        for future in tqdm(as_completed(metric_futures), total=len(metric_futures)):
+            records.append(future.result())
+
+    return records
+
+
+def compare_formats(
+    baseline: FileFormat,
+    formats: list[FileFormat],
+    table: pa.Table,
+    directory: Path | str,
+    prefix: str = "",
+    metrics: tuple[Callable, ...] = (estimate_de, estimate_xet),
+) -> list[dict]:
+    """Write a table in the baseline format and each variant format, comparing
+    each variant against the baseline. One record per format variant."""
+    directory = Path(directory)
+    baseline_path = baseline.write("", table, directory, prefix)
+
+    results = []
+    for fmt in formats:
+        path = fmt.write("", table, directory, prefix)
+        record = {
+            "format": fmt.name,
+            "params": fmt.paramstem,
+            "compression": fmt.compression,
+        }
+        for fn in metrics:
+            record.update(fn([baseline_path, path]))
+        results.append(record)
+
+    return results
