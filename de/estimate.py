@@ -30,7 +30,7 @@ def compare_formats_tables(
     tables: dict[str, dict[str, Path | pa.Table]],
     directory: Path | str,
     metrics: tuple[Callable, ...] = (estimate_de, estimate_xet),
-    max_workers: int = None,
+    max_workers: int | None = None,
     sanity_check: bool = True,
 ) -> list[dict]:
     """For each format and variant, write/rewrite files and estimate deduplication.
@@ -70,7 +70,7 @@ def compare_formats_tables(
                     futures[f] = (variant, fmt, name)
 
         # Collect results as they complete, grouping paths by (fmt, variant)
-        groups = defaultdict(dict)
+        groups: defaultdict[tuple, dict] = defaultdict(dict)
         for future in tqdm(as_completed(futures), total=len(futures)):
             variant, fmt, name = futures[future]
             groups[(variant, fmt)][name] = future.result()
@@ -101,15 +101,14 @@ def compare_formats(
     """Write a table in the baseline format and each variant format, comparing
     each variant against the baseline. One record per format variant."""
     directory = Path(directory)
-    baseline_path = baseline.write("", table, directory, prefix)
+    baseline_path = baseline.write(prefix, table, directory)
 
     results = []
     for fmt in formats:
-        path = fmt.write("", table, directory, prefix)
+        path = fmt.write(prefix, table, directory)
         record = {
             "format": fmt.name,
             "params": fmt.paramstem,
-            "compression": fmt.compression,
         }
         for fn in metrics:
             record.update(fn([baseline_path, path]))
