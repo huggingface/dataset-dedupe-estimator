@@ -33,8 +33,9 @@ class FileFormat:
         raise NotImplementedError
 
     def derive_path(self, name: str, directory: Path) -> Path:
-        """Construct an output path under directory/kind/ using name."""
-        return directory / f"{name}-{self.paramstem}.{self.suffix}"
+        """Construct an output path under directory using name."""
+        stem = f"{name}-{self.paramstem}" if self.paramstem else name
+        return directory / f"{stem}.{self.suffix}"
 
     def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
         """Write a PyArrow table or rewrite a source parquet file to the derived path."""
@@ -144,26 +145,27 @@ class ParquetRs(FileFormat):
 @dataclass(frozen=True)
 class JsonLines(FileFormat):
     suffix = "jsonlines"
+    compression: Optional[str] = None
 
     @property
     def paramstem(self) -> str:
-        return self.compression if self.compression != "none" else "uncompressed"
+        return self.compression or ""
 
     def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
         path = self.derive_path(name, directory)
         table = pq.read_table(src) if isinstance(src, Path) else src
-        comp = None if self.compression == "none" else self.compression
-        table.to_pandas().to_json(path, orient="records", lines=True, compression=comp)
+        table.to_pandas().to_json(path, orient="records", lines=True, compression=self.compression)
         return path
 
 
 @dataclass(frozen=True)
 class Sqlite(FileFormat):
     suffix = "sqlite"
+    compression: Optional[str] = None
 
     @property
     def paramstem(self) -> str:
-        return self.compression if self.compression != "none" else "uncompressed"
+        return self.compression or ""
 
     def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
         path = self.derive_path(name, directory)

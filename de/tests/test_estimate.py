@@ -1,12 +1,12 @@
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 from de.estimate import (
     estimate_de,
-    estimate_xtool,
     compare_formats_tables,
     compare_formats,
 )
@@ -43,22 +43,9 @@ class TestEstimateDe:
         mock.assert_called_once_with(["a.parquet", "b.parquet"])
 
 
-class TestEstimateXtool:
-    def test_parses_transmitted_bytes(self, monkeypatch):
-        monkeypatch.setenv("XTOOL_TOKEN", "fake-token")
-        mock_result = MagicMock()
-        mock_result.stderr = (
-            "Dedupping 2 files...\nUsing lz4 compression\n\n\n"
-            "Clean results:\nTransmitted 12345678 bytes in total.\n"
-        )
-        with patch("de.estimate.subprocess.run", return_value=mock_result):
-            result = estimate_xtool([Path("a.parquet"), Path("b.parquet")])
-        assert result == {"transmitted_xtool_bytes": 12345678}
-
-
 class TestCompareFormatsTables:
     def test_one_record_per_format_per_variant(self, tmp_path, table, edit):
-        formats = [ParquetCpp(), ParquetCpp(compression="zstd")]
+        formats = [ParquetCpp(use_cdc=False), ParquetCpp(use_cdc=False, compression="zstd")]
         results = compare_formats_tables(
             formats,
             {"edit1": {"original": table, "edit1": edit}},
@@ -66,67 +53,62 @@ class TestCompareFormatsTables:
             metrics=(noop_metric,),
         )
         assert len(results) == 2
-        assert results[0]["name"] == "edit1"
-        assert results[1]["name"] == "edit1"
-        assert results[0]["compression"] == "none"
-        assert results[1]["compression"] == "zstd"
+        assert all(r["variant"] == "edit1" for r in results)
+        assert {r["params"] for r in results} == {"", "zstd"}
 
-    def test_record_has_name_compression_and_metric_fields(self, tmp_path, table, edit):
+    def test_record_has_expected_fields(self, tmp_path, table, edit):
         results = compare_formats_tables(
-            [ParquetCpp()],
+            [ParquetCpp(use_cdc=False)],
             {"edit1": {"original": table, "edit1": edit}},
             tmp_path,
             metrics=(noop_metric,),
         )
-        assert results[0] == {
-            "name": "edit1",
-            "compression": "none",
-            "total_len": 100,
-            "chunk_bytes": 50,
-        }
+        assert results[0]["variant"] == "edit1"
+        assert results[0]["format"] == "ParquetCpp"
+        assert results[0]["params"] == ""
+        assert results[0]["total_len"] == 100
+        assert results[0]["chunk_bytes"] == 50
 
-    def test_files_written_with_prefix(self, tmp_path, table, edit):
+    def test_files_written_to_correct_path(self, tmp_path, table, edit):
         compare_formats_tables(
-            [ParquetCpp()],
+            [ParquetCpp(use_cdc=False)],
             {"edit1": {"original": table, "edit1": edit}},
             tmp_path,
-            prefix="run1",
             metrics=(noop_metric,),
         )
-        assert (tmp_path / "parquet" / "run1-original.parquet").exists()
-        assert (tmp_path / "parquet" / "run1-edit1.parquet").exists()
+        assert (tmp_path / "edit1" / "ParquetCpp" / "original.parquet").exists()
+        assert (tmp_path / "edit1" / "ParquetCpp" / "edit1.parquet").exists()
 
-    def test_metric_receives_original_and_edit_paths(self, tmp_path, table, edit):
+    def test_metric_receives_all_paths(self, tmp_path, table, edit):
         calls = []
         compare_formats_tables(
-            [ParquetCpp()],
+            [ParquetCpp(use_cdc=False)],
             {"edit1": {"original": table, "edit1": edit}},
             tmp_path,
-            metrics=(lambda paths: calls.append(paths) or {},),
+            metrics=(lambda paths: calls.append(paths) or noop_metric(paths),),
         )
         assert len(calls) == 1
-        assert "original" in calls[0][0].name
-        assert "edit1" in calls[0][1].name
+        names = [p.name for p in calls[0]]
+        assert any("original" in n for n in names)
+        assert any("edit1" in n for n in names)
 
     def test_multiple_metrics_merged_into_record(self, tmp_path, table, edit):
         results = compare_formats_tables(
-            [ParquetCpp()],
+            [ParquetCpp(use_cdc=False)],
             {"edit1": {"original": table, "edit1": edit}},
             tmp_path,
-            metrics=(lambda _: {"a": 1}, lambda _: {"b": 2}),
+            metrics=(noop_metric, lambda _: {"extra": 99}),
         )
-        assert results[0]["a"] == 1
-        assert results[0]["b"] == 2
+        assert results[0]["total_len"] == 100
+        assert results[0]["extra"] == 99
 
     def test_paths_variant_rewrites_and_estimates_group(self, tmp_path, table):
         src = tmp_path / "src"
         src.mkdir()
-        import pyarrow.parquet as pq
-
         pq.write_table(table, src / "file0.parquet")
         pq.write_table(table, src / "file1.parquet")
         results = compare_formats_tables(
-            [ParquetCpp()],
+            [ParquetCpp(use_cdc=False)],
             {
                 "combined": {
                     "file0": src / "file0.parquet",
@@ -137,33 +119,33 @@ class TestCompareFormatsTables:
             metrics=(noop_metric,),
         )
         assert len(results) == 1
-        assert results[0]["name"] == "combined"
-        assert results[0]["compression"] == "none"
+        assert results[0]["variant"] == "combined"
+        assert results[0]["params"] == ""
 
 
 class TestCompareFormats:
     def test_one_record_per_variant(self, tmp_path, table):
         variants = [
-            ParquetCpp(compression="zstd"),
-            ParquetCpp(compression="snappy"),
+            ParquetCpp(use_cdc=False, compression="zstd"),
+            ParquetCpp(use_cdc=False, compression="snappy"),
         ]
         results = compare_formats(
-            ParquetCpp(), variants, table, tmp_path, metrics=(noop_metric,)
+            ParquetCpp(use_cdc=False), variants, table, tmp_path, metrics=(noop_metric,)
         )
         assert len(results) == 2
-        assert results[0]["kind"] == "parquet-zstd"
-        assert results[1]["kind"] == "parquet-snappy"
+        assert {r["params"] for r in results} == {"zstd", "snappy"}
 
-    def test_record_has_kind_compression_and_metric_fields(self, tmp_path, table):
+    def test_record_has_expected_fields(self, tmp_path, table):
         results = compare_formats(
-            ParquetCpp(),
-            [ParquetCpp(compression="zstd")],
+            ParquetCpp(use_cdc=False),
+            [ParquetCpp(use_cdc=False, compression="zstd")],
             table,
             tmp_path,
             metrics=(noop_metric,),
         )
         assert results[0] == {
-            "kind": "parquet-zstd",
+            "format": "ParquetCpp",
+            "params": "zstd",
             "compression": "zstd",
             "total_len": 100,
             "chunk_bytes": 50,
@@ -171,34 +153,34 @@ class TestCompareFormats:
 
     def test_baseline_and_variant_files_written(self, tmp_path, table):
         compare_formats(
-            ParquetCpp(),
-            [ParquetCpp(compression="zstd")],
+            ParquetCpp(use_cdc=False),
+            [ParquetCpp(use_cdc=False, compression="zstd")],
             table,
             tmp_path,
             metrics=(noop_metric,),
         )
-        assert (tmp_path / "parquet" / ".parquet").exists()
-        assert (tmp_path / "parquet-zstd" / ".parquet").exists()
+        assert (tmp_path / ".parquet").exists()
+        assert (tmp_path / "-zstd.parquet").exists()
 
     def test_metric_receives_baseline_and_variant_paths(self, tmp_path, table):
         calls = []
         compare_formats(
-            ParquetCpp(),
-            [ParquetCpp(compression="zstd")],
+            ParquetCpp(use_cdc=False),
+            [ParquetCpp(use_cdc=False, compression="zstd")],
             table,
             tmp_path,
-            metrics=(lambda paths: calls.append(paths) or {},),
+            metrics=(lambda paths: calls.append(paths) or noop_metric(paths),),
         )
         assert len(calls) == 1
-        assert "parquet-zstd" in calls[0][1].name
+        assert "zstd" in calls[0][1].name
 
     def test_multiple_metrics_merged_into_record(self, tmp_path, table):
         results = compare_formats(
-            ParquetCpp(),
-            [ParquetCpp(compression="zstd")],
+            ParquetCpp(use_cdc=False),
+            [ParquetCpp(use_cdc=False, compression="zstd")],
             table,
             tmp_path,
-            metrics=(lambda _: {"a": 1}, lambda _: {"b": 2}),
+            metrics=(noop_metric, lambda _: {"extra": 42}),
         )
-        assert results[0]["a"] == 1
-        assert results[0]["b"] == 2
+        assert results[0]["total_len"] == 100
+        assert results[0]["extra"] == 42

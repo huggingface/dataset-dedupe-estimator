@@ -2,7 +2,6 @@ import glob
 
 from IPython.display import display, Markdown, HTML
 import humanize
-import pyarrow as pa
 
 from .core import chunks
 from .estimate import estimate_de, estimate_xet

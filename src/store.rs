@@ -1,5 +1,4 @@
 use gearhash::Hasher;
-use indicatif::{ParallelProgressIterator, ProgressIterator};
 use lz4_flex::block;
 use pyo3::IntoPyObject;
 use rayon::prelude::*;
@@ -93,13 +92,6 @@ impl ChunkStore {
         store.add(&chunk);
 
         Ok(store)
-    }
-
-    pub fn from_strings(data: &[String], store_data: bool) -> Result<Vec<Self>, std::io::Error> {
-        data.iter()
-            //.progress_count(data.len() as u64)
-            .map(|bytes| ChunkStore::from_stream(&mut bytes.as_bytes(), store_data))
-            .collect()
     }
 
     pub fn from_file<P: AsRef<Path>>(path: P, store_data: bool) -> Result<Self, std::io::Error> {

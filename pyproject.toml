@@ -33,7 +33,7 @@ module-name = "de.core"
 features = ["pyo3/extension-module"]
 
 [dependency-groups]
-dev = ["mypy>=1.0", "pytest>=8.3.5", "ruff>=0.15.1"]
+dev = ["maturin>=1.8,<2.0", "mypy>=1.0", "pytest>=8.3.5", "ruff>=0.15.1"]
 
 [tool.mypy]
 ignore_missing_imports = true
