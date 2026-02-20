@@ -127,7 +127,7 @@ def synthetic(
         ParquetRs(use_cdc=True, compression="zstd"),
     ]
     if with_json:
-        formats += [JsonLines("none"), JsonLines("zstd")]
+        formats += [JsonLines(), JsonLines("zstd")]
     if with_sqlite:
         formats.append(Sqlite())
 
