@@ -1,6 +1,5 @@
 import glob
 
-from IPython.display import display, Markdown, HTML
 import humanize
 
 from .core import chunks
@@ -83,6 +82,7 @@ def visualize(
                 path = f"{prefix}-{cdc_kind}-{name.lower()}.parquet.png"
                 row += f"| ![CDC Parquet {compression}]({path}) "
             markdown_table += row + "|\n"
+        from IPython.display import display, Markdown
         display(Markdown(markdown_table))
 
     print_table(results)
@@ -148,4 +148,5 @@ def visualize_multidoc_diff(file_paths):
     html += "</div>"
     html += '<p style="font-size: 15px;">Each vertical strip is a document. Chunks are aligned horizontally. Each doc has its own color; faded color means shared chunk, gray means not present.</p>'
 
+    from IPython.display import display, HTML
     display(HTML(html))
