@@ -1,4 +1,3 @@
-from pydoc import text
 from humanize import naturalsize
 from rich.bar import Bar
 from rich.console import Console

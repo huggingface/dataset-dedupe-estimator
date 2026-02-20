@@ -1,6 +1,5 @@
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use std::collections::HashMap;
 use std::path::Path;
 
 mod fileutils;
@@ -27,7 +26,7 @@ fn estimate(py: Python<'_>, file_paths: Vec<String>) -> PyResult<(usize, usize, 
 
         let file_dir = Path::new(file_paths.last().unwrap()).parent().unwrap();
         let output_file_path = file_dir.join("merged.png");
-        write_png(&merged.segments(), &output_file_path.to_str().unwrap())?;
+        write_png(&merged.segments(), output_file_path.to_str().unwrap())?;
 
         Ok(merged.stats())
     })

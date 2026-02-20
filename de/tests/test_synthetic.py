@@ -1,7 +1,8 @@
+import numpy as np
 import pyarrow as pa
 import pytest
 
-from de.synthetic import FakeDataGenerator
+from de.synthetic import DataGenerator, generate_array
 
 
 SCHEMA = {"a": "int", "b": "str"}
@@ -9,7 +10,7 @@ SCHEMA = {"a": "int", "b": "str"}
 
 @pytest.fixture
 def gen():
-    return FakeDataGenerator(SCHEMA, seed=42)
+    return DataGenerator(SCHEMA, seed=42)
 
 
 @pytest.fixture
@@ -22,47 +23,48 @@ class TestDeterminism:
         "dtype", ["int", "float", "str", "bool", ["int"], {"x": "int", "y": "str"}]
     )
     def test_same_seed_same_output(self, dtype):
-        a = FakeDataGenerator({"f": dtype}, seed=0).generate_data(dtype, 20)
-        b = FakeDataGenerator({"f": dtype}, seed=0).generate_data(dtype, 20)
-        assert pa.array(a).equals(pa.array(b))
+        a = generate_array(np.random.default_rng(0), dtype, 20)
+        b = generate_array(np.random.default_rng(0), dtype, 20)
+        assert a.equals(b)
 
     @pytest.mark.parametrize("dtype", ["int", "float", "str", "bool"])
     def test_different_seed_different_output(self, dtype):
-        a = FakeDataGenerator({"f": dtype}, seed=1).generate_data(dtype, 20)
-        b = FakeDataGenerator({"f": dtype}, seed=2).generate_data(dtype, 20)
-        assert not pa.array(a).equals(pa.array(b))
+        a = generate_array(np.random.default_rng(1), dtype, 20)
+        b = generate_array(np.random.default_rng(2), dtype, 20)
+        assert not a.equals(b)
 
 
-class TestGenerateData:
-    def test_int(self, gen):
-        data = gen.generate_data("int", 10)
+class TestGenerateArray:
+    def test_int(self):
+        data = generate_array(np.random.default_rng(0), "int", 10)
         assert len(data) == 10
 
-    def test_float(self, gen):
-        data = gen.generate_data("float", 10)
+    def test_float(self):
+        data = generate_array(np.random.default_rng(0), "float", 10)
         assert len(data) == 10
 
-    def test_str(self, gen):
-        data = gen.generate_data("str", 5)
+    def test_str(self):
+        data = generate_array(np.random.default_rng(0), "str", 5)
         assert len(data) == 5
-        assert all(isinstance(v, str) for v in data)
+        assert all(isinstance(v.as_py(), str) for v in data)
 
-    def test_bool(self, gen):
-        data = gen.generate_data("bool", 10)
+    def test_bool(self):
+        data = generate_array(np.random.default_rng(0), "bool", 10)
         assert len(data) == 10
 
-    def test_list(self, gen):
-        data = gen.generate_data(["int"], 10)
+    def test_list(self):
+        data = generate_array(np.random.default_rng(0), ["int"], 10)
         assert len(data) == 10
 
-    def test_dict(self, gen):
-        data = gen.generate_data({"x": "int", "y": "str"}, 5)
+    def test_dict(self):
+        data = generate_array(np.random.default_rng(0), {"x": "int", "y": "str"}, 5)
         assert len(data) == 5
-        assert all(set(v.keys()) == {"x", "y"} for v in data)
+        assert data.type.get_field_index("x") >= 0
+        assert data.type.get_field_index("y") >= 0
 
-    def test_unsupported_type_raises(self, gen):
+    def test_unsupported_type_raises(self):
         with pytest.raises(ValueError, match="Unsupported data type"):
-            gen.generate_data("unknown", 5)
+            generate_array(np.random.default_rng(0), "unknown", 5)
 
 
 class TestGenerateTable:
@@ -145,7 +147,7 @@ class TestGenerateSyntheticTables:
         assert "updated_a" in variants
 
     def test_update_columns_list_type(self):
-        gen = FakeDataGenerator({"a": "int", "b": "str", "c": ["float"]}, seed=42)
+        gen = DataGenerator({"a": "int", "b": "str", "c": ["float"]}, seed=42)
         _, variants = gen.generate_synthetic_tables(
             100, edit_points=[0.5], update_columns=["c"]
         )

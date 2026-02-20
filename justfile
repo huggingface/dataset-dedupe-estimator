@@ -4,9 +4,12 @@ fmt:
 
 lint:
     uv run ruff check de
+    cargo fmt --check
+    cargo check
+    cargo clippy
 
 typecheck:
     uv run mypy de
 
 test:
-    uv run pytest de/tests
+    uv run pytest de

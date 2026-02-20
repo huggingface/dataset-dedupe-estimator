@@ -4,14 +4,14 @@ use std::fs::File;
 use std::io;
 
 #[derive(Copy, Clone)]
-struct RGB {
+struct Rgb {
     r: u8,
     g: u8,
     b: u8,
 }
 
 #[derive(Copy, Clone)]
-struct FRGB {
+struct Frgb {
     r: f32,
     g: f32,
     b: f32,
@@ -21,163 +21,163 @@ const IMAGE_DIM: usize = 256;
 const BLOCK_DIM: usize = 8;
 const SEQUENCE_LENGTH: usize = (IMAGE_DIM / BLOCK_DIM) * IMAGE_DIM;
 
-const COLORS: [FRGB; 32] = [
-    FRGB {
+const COLORS: [Frgb; 32] = [
+    Frgb {
         r: 0.0,
         g: 255.0,
         b: 0.0,
     }, // Green
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 0.0,
         b: 0.0,
     }, // Red
-    FRGB {
+    Frgb {
         r: 0.0,
         g: 0.0,
         b: 255.0,
     }, // Blue
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 255.0,
         b: 0.0,
     }, // Yellow
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 165.0,
         b: 0.0,
     }, // Orange
-    FRGB {
+    Frgb {
         r: 128.0,
         g: 0.0,
         b: 128.0,
     }, // Purple
-    FRGB {
+    Frgb {
         r: 0.0,
         g: 255.0,
         b: 255.0,
     }, // Cyan
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 0.0,
         b: 255.0,
     }, // Magenta
-    FRGB {
+    Frgb {
         r: 192.0,
         g: 192.0,
         b: 192.0,
     }, // Silver
-    FRGB {
+    Frgb {
         r: 128.0,
         g: 128.0,
         b: 128.0,
     }, // Gray
-    FRGB {
+    Frgb {
         r: 128.0,
         g: 0.0,
         b: 0.0,
     }, // Maroon
-    FRGB {
+    Frgb {
         r: 128.0,
         g: 128.0,
         b: 0.0,
     }, // Olive
-    FRGB {
+    Frgb {
         r: 0.0,
         g: 128.0,
         b: 0.0,
     }, // Dark Green
-    FRGB {
+    Frgb {
         r: 0.0,
         g: 128.0,
         b: 128.0,
     }, // Teal
-    FRGB {
+    Frgb {
         r: 0.0,
         g: 0.0,
         b: 128.0,
     }, // Navy
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 105.0,
         b: 180.0,
     }, // Hot Pink
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 20.0,
         b: 147.0,
     }, // Deep Pink
-    FRGB {
+    Frgb {
         r: 75.0,
         g: 0.0,
         b: 130.0,
     }, // Indigo
-    FRGB {
+    Frgb {
         r: 240.0,
         g: 230.0,
         b: 140.0,
     }, // Khaki
-    FRGB {
+    Frgb {
         r: 173.0,
         g: 216.0,
         b: 230.0,
     }, // Light Blue
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 182.0,
         b: 193.0,
     }, // Light Pink
-    FRGB {
+    Frgb {
         r: 144.0,
         g: 238.0,
         b: 144.0,
     }, // Light Green
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 255.0,
         b: 224.0,
     }, // Light Yellow
-    FRGB {
+    Frgb {
         r: 0.0,
         g: 255.0,
         b: 127.0,
     }, // Spring Green
-    FRGB {
+    Frgb {
         r: 70.0,
         g: 130.0,
         b: 180.0,
     }, // Steel Blue
-    FRGB {
+    Frgb {
         r: 210.0,
         g: 105.0,
         b: 30.0,
     }, // Chocolate
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 69.0,
         b: 0.0,
     }, // Orange Red
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 228.0,
         b: 181.0,
     }, // Moccasin
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 218.0,
         b: 185.0,
     }, // Peach Puff
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 240.0,
         b: 245.0,
     }, // Lavender Blush
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 250.0,
         b: 205.0,
     }, // Lemon Chiffon
-    FRGB {
+    Frgb {
         r: 255.0,
         g: 228.0,
         b: 225.0,
@@ -185,11 +185,11 @@ const COLORS: [FRGB; 32] = [
 ];
 
 #[inline(always)]
-fn getcolor(i: usize) -> FRGB {
+fn getcolor(i: usize) -> Frgb {
     COLORS[i % COLORS.len()]
 }
 
-fn interpolate_sample(s: &[usize], pos: f32) -> FRGB {
+fn interpolate_sample(s: &[usize], pos: f32) -> Frgb {
     if pos == pos.floor() {
         let mut ipos = pos as isize;
         if ipos < 0 {
@@ -198,7 +198,7 @@ fn interpolate_sample(s: &[usize], pos: f32) -> FRGB {
         if ipos >= s.len() as isize {
             ipos = s.len() as isize - 1;
         }
-        return getcolor(s[ipos as usize]);
+        getcolor(s[ipos as usize])
     } else {
         let mut ipos = pos as isize;
         if ipos < 0 {
@@ -211,7 +211,7 @@ fn interpolate_sample(s: &[usize], pos: f32) -> FRGB {
         let right_weight = 1.0 - left_weight;
         let color_left = getcolor(s[ipos as usize]);
         let color_right = getcolor(s[min(ipos as usize + 1, s.len() - 1)]);
-        FRGB {
+        Frgb {
             r: left_weight * color_left.r + right_weight * color_right.r,
             g: left_weight * color_left.g + right_weight * color_right.g,
             b: left_weight * color_left.b + right_weight * color_right.b,
@@ -219,7 +219,7 @@ fn interpolate_sample(s: &[usize], pos: f32) -> FRGB {
     }
 }
 
-fn generate_color_sequence(s: &[usize]) -> Vec<RGB> {
+fn generate_color_sequence(s: &[usize]) -> Vec<Rgb> {
     let mut ret = Vec::new();
     for i in 0..SEQUENCE_LENGTH {
         let mut fpos = (i * s.len()) as f32 / SEQUENCE_LENGTH as f32;
@@ -227,7 +227,7 @@ fn generate_color_sequence(s: &[usize]) -> Vec<RGB> {
         if fpos > (s.len() - 1) as f32 {
             fpos = (s.len() - 1) as f32;
         }
-        let mut color = FRGB {
+        let mut color = Frgb {
             r: 0.0,
             g: 0.0,
             b: 0.0,
@@ -247,10 +247,10 @@ fn generate_color_sequence(s: &[usize]) -> Vec<RGB> {
         color.r /= weight;
         color.g /= weight;
         color.b /= weight;
-        ret.push(RGB {
-            r: color.r.min(255.0).max(0.0) as u8,
-            g: color.g.min(255.0).max(0.0) as u8,
-            b: color.b.min(255.0).max(0.0) as u8,
+        ret.push(Rgb {
+            r: color.r.clamp(0.0, 255.0) as u8,
+            g: color.g.clamp(0.0, 255.0) as u8,
+            b: color.b.clamp(0.0, 255.0) as u8,
         });
     }
     ret
@@ -259,7 +259,7 @@ fn generate_color_sequence(s: &[usize]) -> Vec<RGB> {
 pub(crate) fn write_png(segments: &[usize], filename: &str) -> io::Result<()> {
     let colors = generate_color_sequence(segments);
     let file = File::create(filename)?;
-    let ref mut w = io::BufWriter::new(file);
+    let w = &mut io::BufWriter::new(file);
 
     let mut encoder = Encoder::new(w, IMAGE_DIM as u32, IMAGE_DIM as u32);
     encoder.set_color(png::ColorType::Rgb);
