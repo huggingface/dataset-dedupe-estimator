@@ -81,6 +81,7 @@ class ParquetCpp(FileFormat):
         directory: Path,
         block_size: int = 1024 * 1024,
         sanity_check: bool = True,
+        **kwargs,
     ) -> Path:
         dest = self.derive_path(name, directory)
         kwargs = self._write_kwargs()

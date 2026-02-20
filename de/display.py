@@ -35,7 +35,7 @@ def print_table(results: list[dict]) -> None:
 
     results = sorted(results, key=lambda r: (r["variant"], r["dedup_ratio"]))
 
-    best_ratio = {}
+    best_ratio: dict[str, float] = {}
     for row in results:
         g = row["variant"]
         r = round(row["dedup_ratio"], 2)
@@ -64,7 +64,7 @@ def print_table(results: list[dict]) -> None:
 
         ratio = round(row["dedup_ratio"], 2)
         is_best = ratio == best_ratio[group]
-        style = "bold green" if is_best else None
+        style = "bold green" if is_best else ""
 
         values = [
             row["variant"] if is_first_in_group else "",

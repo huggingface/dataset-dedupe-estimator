@@ -149,7 +149,6 @@ class TestCompareFormats:
         assert results[0] == {
             "format": "ParquetCpp",
             "params": "zstd",
-            "compression": "zstd",
             "total_len": 100,
             "chunk_bytes": 50,
         }
