@@ -1,117 +1,119 @@
 from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
-from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pyarrow as pa
 from tqdm import tqdm
 
-from .core import estimate, estimate_xet as _estimate_xet
+from .core import estimate as _estimate_de, estimate_xet as _estimate_xet
 from .formats import FileFormat
 
 
-def estimate_de(paths):
+@dataclass
+class EstimationResult:
+    format: FileFormat
+    numfiles: int
+    total_len: int
+    chunk_bytes: int
+    compressed_chunk_bytes: int
+    dedup_ratio: float
+    xet_bytes: int
+    xet_dedup_ratio: float
+    group: str = ""
+
+
+def estimate(paths):
     string_paths = list(map(str, paths))
-    total_bytes, chunk_bytes, compressed_chunk_bytes = estimate(string_paths)
+    total_bytes, chunk_bytes, compressed_chunk_bytes = _estimate_de(string_paths)
+    xet_bytes = _estimate_xet(string_paths)
     return {
+        "numfiles": len(string_paths),
         "total_len": total_bytes,
         "chunk_bytes": chunk_bytes,
         "compressed_chunk_bytes": compressed_chunk_bytes,
+        "dedup_ratio": chunk_bytes / total_bytes,
+        "xet_bytes": xet_bytes,
+        "xet_dedup_ratio": xet_bytes / total_bytes,
     }
-
-
-def estimate_xet(paths):
-    xet_bytes = _estimate_xet(list(map(str, paths)))
-    return {"xet_bytes": xet_bytes}
 
 
 def compare_formats_tables(
     formats: list[FileFormat],
     tables: dict[str, dict[str, Path | pa.Table]],
     directory: Path | str,
-    metrics: tuple[Callable, ...] = (estimate_de, estimate_xet),
     max_workers: int | None = None,
     sanity_check: bool = True,
-) -> list[dict]:
-    """For each format and variant, write/rewrite files and estimate deduplication.
+) -> list[EstimationResult]:
+    """For each format and group, write/rewrite files and estimate deduplication.
 
-    tables maps variant name -> {name: Path | pa.Table}.
+    tables maps group name -> {name: Path | pa.Table}.
     Path values: rewrite all files, estimate across the group (one record per
-    (format, variant)). pa.Table values: compare first (original) against second
-    (edit), one record per (format, variant).
+    (format, group)). pa.Table values: compare first (original) against second
+    (edit), one record per (format, group).
     """
     directory = Path(directory)
-
-    def compute_metrics(variant, fmt, out_paths):
-        record = {
-            "format": fmt.name,
-            "params": fmt.paramstem,
-            "variant": variant,
-            "numfiles": len(out_paths),
-        }
-        for fn in metrics:
-            record.update(fn([out_paths[k] for k in sorted(out_paths)]))
-        record["dedup_ratio"] = record["chunk_bytes"] / record["total_len"]
-        if "xet_bytes" in record:
-            record["xet_dedup_ratio"] = record["xet_bytes"] / record["total_len"]
-        return record
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all file writes
         futures = {}
-        for variant, data in tables.items():
+        for table_name, table in tables.items():
             for fmt in formats:
-                prefix = directory / variant / fmt.name
+                prefix = directory / table_name / fmt.name
                 prefix.mkdir(parents=True, exist_ok=True)
-                for name, value in data.items():
+                for name, value in table.items():
                     f = executor.submit(
                         fmt.write, name, value, prefix, sanity_check=sanity_check
                     )
-                    futures[f] = (variant, fmt, name)
+                    futures[f] = (table_name, fmt)
 
-        # Collect results as they complete, grouping paths by (fmt, variant)
-        groups: defaultdict[tuple, dict] = defaultdict(dict)
+        # Collect results and group by (table_name, fmt)
+        groups: defaultdict[tuple, list] = defaultdict(list)
         for future in tqdm(as_completed(futures), total=len(futures)):
-            variant, fmt, name = futures[future]
-            groups[(variant, fmt)][name] = future.result()
+            table_name, fmt = futures[future]
+            groups[(table_name, fmt)].append(future.result())
 
-        # Submit metric computation for each group
-        metric_futures = []
-        for (variant, fmt), out_paths in groups.items():
-            metric_futures.append(
-                executor.submit(compute_metrics, variant, fmt, out_paths)
-            )
+        # Estimate in parallel for each group
+        keys = list(groups.keys())
+        results = executor.map(estimate, groups.values())
+        estimates = dict(zip(keys, results))
 
-        # Collect metric results as they complete
-        records = []
-        for future in tqdm(as_completed(metric_futures), total=len(metric_futures)):
-            records.append(future.result())
-
-    return records
+    return [
+        EstimationResult(format=fmt, group=table_name, **data)
+        for (table_name, fmt), data in estimates.items()
+    ]
 
 
 def compare_formats(
     baseline: FileFormat,
-    formats: list[FileFormat],
+    contenders: dict[str, FileFormat],
     table: pa.Table,
     directory: Path | str,
-    prefix: str = "",
-    metrics: tuple[Callable, ...] = (estimate_de, estimate_xet),
-) -> list[dict]:
-    """Write a table in the baseline format and each variant format, comparing
-    each variant against the baseline. One record per format variant."""
+) -> list[EstimationResult]:
+    """Write a table in the baseline format and each contender format, comparing
+    each contender against the baseline. One record per contender."""
     directory = Path(directory)
-    baseline_path = baseline.write(prefix, table, directory)
 
-    results = []
-    for fmt in formats:
-        path = fmt.write(prefix, table, directory)
-        record = {
-            "format": fmt.name,
-            "params": fmt.paramstem,
+    with ThreadPoolExecutor() as executor:
+        # Submit all writes
+        baseline_future = executor.submit(baseline.write, "baseline", table, directory)
+        futures = {
+            executor.submit(fmt.write, name, table, directory): name
+            for name, fmt in contenders.items()
         }
-        for fn in metrics:
-            record.update(fn([baseline_path, path]))
-        results.append(record)
 
-    return results
+        # Collect write results
+        baseline_path = baseline_future.result()
+        contender_paths = {}
+        for future in tqdm(as_completed(futures), total=len(futures)):
+            contender_paths[futures[future]] = future.result()
+
+        # Estimate in parallel
+        names = list(contender_paths.keys())
+        path_pairs = ([baseline_path, contender_paths[name]] for name in names)
+        estimates = executor.map(estimate, path_pairs)
+
+    return [
+        EstimationResult(format=contenders[name], group="param-impact", **data)
+        for name, data in zip(names, estimates)
+    ]

@@ -1,7 +1,9 @@
 from dataclasses import dataclass, asdict
 from pathlib import Path
+import re
 import sqlite3
 
+from humanize import naturalsize
 import pyarrow as pa
 import pyarrow.parquet as pq
 from typing import Optional
@@ -22,7 +24,7 @@ class FileFormat:
 
     @property
     def name(self) -> str:
-        return self.__class__.__name__.replace("Format", "")
+        raise NotImplementedError
 
     @property
     def suffix(self) -> str:
@@ -34,7 +36,11 @@ class FileFormat:
 
     def derive_path(self, name: str, directory: Path) -> Path:
         """Construct an output path under directory using name."""
-        stem = f"{name}-{self.paramstem}" if self.paramstem else name
+        if self.paramstem:
+            slug = re.sub(r"[^a-zA-Z0-9]+", "-", self.paramstem)
+            stem = f"{name}-{slug}"
+        else:
+            stem = name
         return directory / f"{stem}.{self.suffix}"
 
     def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
@@ -44,6 +50,7 @@ class FileFormat:
 
 @dataclass(frozen=True)
 class ParquetCpp(FileFormat):
+    name = "parquet-cpp"
     suffix = "parquet"
     use_cdc: bool | CdcParams
     compression: Optional[str] = None
@@ -58,7 +65,21 @@ class ParquetCpp(FileFormat):
             parts.append(self.compression)
         if self.use_cdc:
             parts.append("cdc")
-        return "-".join(parts)
+        if self.row_group_size is not None:
+            size = (
+                naturalsize(self.row_group_size, binary=True, format="%.0f")
+                .removesuffix("B")
+                .replace(" ", "")
+            )
+            parts.append(f"rg={size}")
+        if self.data_page_size is not None:
+            size = (
+                naturalsize(self.data_page_size, binary=True, format="%.0f")
+                .removesuffix("B")
+                .replace(" ", "")
+            )
+            parts.append(f"dp={size}")
+        return " ".join(parts)
 
     def _write_kwargs(self) -> dict:
         kwargs: dict = {
@@ -111,6 +132,7 @@ class ParquetCpp(FileFormat):
 
 @dataclass(frozen=True)
 class ParquetRs(FileFormat):
+    name = "parquet-rs"
     suffix = "parquet"
     use_cdc: bool | CdcParams
     compression: Optional[str] = None
@@ -122,7 +144,7 @@ class ParquetRs(FileFormat):
             parts.append(self.compression)
         if self.use_cdc:
             parts.append("cdc")
-        return "-".join(parts)
+        return " ".join(parts)
 
     def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
         if isinstance(self.use_cdc, CdcParams):
@@ -145,6 +167,7 @@ class ParquetRs(FileFormat):
 
 @dataclass(frozen=True)
 class JsonLines(FileFormat):
+    name = "jsonl"
     suffix = "jsonlines"
     compression: Optional[str] = None
 
@@ -163,6 +186,7 @@ class JsonLines(FileFormat):
 
 @dataclass(frozen=True)
 class Sqlite(FileFormat):
+    name = "sqlite"
     suffix = "sqlite"
     compression: Optional[str] = None
 

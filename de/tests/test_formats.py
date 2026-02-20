@@ -28,7 +28,7 @@ class TestParquetCpp:
         assert ParquetCpp(use_cdc=True).paramstem == "cdc"
 
     def test_paramstem_with_compression_and_cdc(self):
-        assert ParquetCpp(use_cdc=True, compression="zstd").paramstem == "zstd-cdc"
+        assert ParquetCpp(use_cdc=True, compression="zstd").paramstem == "zstd cdc"
 
     def test_derive_path_plain(self, tmp_path):
         assert (

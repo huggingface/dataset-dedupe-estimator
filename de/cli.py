@@ -1,5 +1,4 @@
 import json
-
 from pathlib import Path
 import sys
 
@@ -12,7 +11,7 @@ import plotly.io as pio
 import plotly.graph_objects as go
 
 from . import display
-from .estimate import estimate_de, estimate_xet
+from .estimate import estimate
 from .fileutils import checkout_file_revisions, get_page_chunk_sizes
 from .formats import ParquetCpp, ParquetRs, JsonLines, Sqlite, CdcParams
 from .estimate import compare_formats_tables, compare_formats
@@ -23,11 +22,15 @@ pio.renderers.default = "browser"  # Opens in a new browser tab
 
 
 @click.group()
-def cli():
-    pass
+@click.option("--plot", is_flag=True, help="Show plots after each command")
+@click.pass_context
+def cli(ctx, plot):
+    ctx.ensure_object(dict)
+    ctx.obj["plot"] = plot
 
 
 @cli.command()
+@click.pass_context
 @click.argument("schema", default='{"a": "int", "b": "str", "c": ["int"]}', type=str)
 @click.option(
     "--target-dir",
@@ -60,6 +63,7 @@ def cli():
     "--no-sanity-check", is_flag=True, help="Skip sanity check after writing files"
 )
 def synthetic(
+    ctx,
     schema,
     size,
     num_edits,
@@ -137,6 +141,8 @@ def synthetic(
     )
 
     display.print_table(results)
+    if ctx.obj["plot"]:
+        display.plot_bars(results)
 
 
 @cli.command()
@@ -165,6 +171,7 @@ def revisions(files, target_dir, from_rev, until_rev):
 
 
 @cli.command()
+@click.pass_context
 @click.argument("directory", type=click.Path(exists=True, file_okay=False))
 @click.option("--with-json", is_flag=True, help="Also calculate JSONLines stats")
 @click.option("--with-sqlite", is_flag=True, help="Also calculate SQLite stats")
@@ -183,6 +190,7 @@ def revisions(files, target_dir, from_rev, until_rev):
     "--no-sanity-check", is_flag=True, help="Skip sanity check after writing files"
 )
 def stats(
+    ctx,
     directory,
     with_json,
     with_sqlite,
@@ -226,20 +234,19 @@ def stats(
         sanity_check=not no_sanity_check,
     )
     display.print_table(results)
-    display.plot_bars(results)
+    if ctx.obj["plot"]:
+        display.plot_bars(results)
 
 
 @cli.command()
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
 def dedup(files):
-    result_de = estimate_de(files)
-    result_xet = estimate_xet(files)
-    dedup_ratio = result_de["chunk_bytes"] / result_de["total_len"]
+    result = estimate(files)
     print(
-        f"Deduplication ratio: {dedup_ratio:.2%} ({naturalsize(result_de['chunk_bytes'])} / {naturalsize(result_de['total_len'])})"
+        f"Deduplication ratio: {result['dedup_ratio']:.2%} ({naturalsize(result['chunk_bytes'])} / {naturalsize(result['total_len'])})"
     )
     print(
-        f"Xet deduplication ratio: {result_xet['transmitted_xet_bytes'] / result_de['total_len']:.2%} ({naturalsize(result_xet['transmitted_xet_bytes'])} / {naturalsize(result_de['total_len'])})"
+        f"Xet deduplication ratio: {result['xet_dedup_ratio']:.2%} ({naturalsize(result['xet_bytes'])} / {naturalsize(result['total_len'])})"
     )
 
 
@@ -264,8 +271,9 @@ def render_readme(template):
 
 
 @cli.command()
+@click.pass_context
 @click.argument("patterns", nargs=-1, type=str)
-def page_chunks(patterns):
+def page_chunks(ctx, patterns):
     paths = []
     for pattern in patterns:
         if "*" in pattern:
@@ -295,10 +303,12 @@ def page_chunks(patterns):
     )
 
     fig.update_xaxes(tickformat=".2s")
-    fig.show()
+    if ctx.obj["plot"]:
+        fig.show()
 
 
 @cli.command
+@click.pass_context
 @click.argument("file", type=Path)
 @click.argument("directory", type=Path)
 @click.option(
@@ -311,15 +321,15 @@ def page_chunks(patterns):
     is_flag=True,
     help="Calculate the impact of data page size on deduplication ratio",
 )
-def param_impact(file, directory, row_group_size, data_page_size):
+def param_impact(ctx, file, directory, row_group_size, data_page_size):
     if row_group_size:
         param_name = "row_group_size"
         param_default = 2**20
-        param_values = [2**i for i in range(10, 22)]
+        param_values = [2**i for i in range(11, 23)]
     elif data_page_size:
         param_name = "data_page_size"
         param_default = 2**20
-        param_values = [2**i for i in range(15, 23)]
+        param_values = [2**i for i in range(12, 23)]
     else:
         print("Please specify either --row-group-size or --data-page-size")
         sys.exit(1)
@@ -327,40 +337,13 @@ def param_impact(file, directory, row_group_size, data_page_size):
     directory.mkdir(exist_ok=True)
     table = pq.read_table(file)
 
-    baseline_fmt = ParquetCpp(
-        use_cdc=True,
-        kind=f"{param_name}={param_default}",
-        **{param_name: param_default},
-    )
-    variant_fmts = [
-        ParquetCpp(use_cdc=True, kind=f"{param_name}={v}", **{param_name: v})
+    baseline_fmt = ParquetCpp(use_cdc=True, **{param_name: param_default})
+    contenders = {
+        f"{param_name}={v}": ParquetCpp(use_cdc=True, **{param_name: v})
         for v in param_values
-    ]
-    results = compare_formats(
-        baseline_fmt,
-        variant_fmts,
-        table,
-        directory,
-        metrics=(estimate_de, estimate_xet),
-    )
+    }
+    results = compare_formats(baseline_fmt, contenders, table, directory)
 
-    for result, value in zip(results, param_values):
-        dedup = result["chunk_bytes"] / result["total_len"]
-        xet_dedup = result["xet_bytes"] / result["total_len"]
-        print(
-            f"{param_name}: {value}\n"
-            f"Deduplication ratio: {dedup:.2%} ({naturalsize(result['chunk_bytes'])} / {naturalsize(result['total_len'])})\n"
-            f"Xet deduplication ratio: {xet_dedup:.2%} ({naturalsize(result['xet_bytes'])} / {naturalsize(result['total_len'])})\n"
-        )
-
-    output_html = f"{param_name}_dedup_ratio.html"
-    display.plot_lines(
-        x_values=param_values,
-        y_series={
-            "DE Dedup Ratio": [r["chunk_bytes"] / r["total_len"] for r in results],
-            "Xet Dedup Ratio": [r["xet_bytes"] / r["total_len"] for r in results],
-        },
-        x_label=param_name,
-        output_html=output_html,
-    )
-    click.echo(f"Wrote figure to {output_html}")
+    display.print_table(results)
+    if ctx.obj["plot"]:
+        display.plot_bars(results)
