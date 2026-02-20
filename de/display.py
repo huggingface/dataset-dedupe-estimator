@@ -49,7 +49,7 @@ def print_table(results: list) -> None:
     table.add_column("Params", justify="left")
     table.add_column("Total Size", justify="right")
     table.add_column("Chunk Size", justify="right")
-    table.add_column("Deduped Ratio", justify="left")
+    table.add_column("Deduped Ratio ↓", justify="left")
     if has_xet:
         table.add_column("Xet Size", justify="right")
         table.add_column("Xet Deduped Ratio", justify="left")
@@ -98,7 +98,7 @@ def plot_bars(results: list, output_html: str | None = None) -> None:
         return f"{r.format.name} ({r.group})" if multi_group else r.format.name
 
     # Sort formats by best ratio; reversed so best appears at top
-    format_best = {}
+    format_best: dict[str, float] = {}
     for r in results:
         k = fmt_key(r)
         if k not in format_best or r.dedup_ratio < format_best[k]:
