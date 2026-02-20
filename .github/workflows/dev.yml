@@ -1,0 +1,37 @@
+name: Dev
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: extractions/setup-just@v2
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: Lint
+        run: just lint
+      - name: Typecheck
+        run: just typecheck
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v5
+      - uses: extractions/setup-just@v2
+      - name: Install dependencies
+        run: uv sync --group dev
+      - name: Build extension
+        run: uv run maturin develop
+      - name: Test
+        run: just test
