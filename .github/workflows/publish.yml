@@ -6,11 +6,13 @@ on:
       - '*'
   workflow_dispatch:
 
-permissions:
-  contents: read
+
+permissions: {}
 
 jobs:
   linux:
+    permissions:
+      contents: read
     runs-on: ubuntu-22.04
     strategy:
       matrix:
@@ -33,6 +35,8 @@ jobs:
           path: dist
 
   macos:
+    permissions:
+      contents: read
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -58,6 +62,8 @@ jobs:
           path: dist
 
   sdist:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
