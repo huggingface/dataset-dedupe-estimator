@@ -3,11 +3,13 @@ use pyo3::prelude::*;
 use std::path::Path;
 
 mod fileutils;
+mod pages;
 mod show;
 mod store;
 mod xet;
 
-use fileutils::rewrite_to_parquet_rs as _rewrite_to_parquet_rs;
+use fileutils::{rewrite_to_parquet_rs as _rewrite_to_parquet_rs, WriterOptions};
+use pages::{read_pages, Page};
 use show::write_png;
 use store::{Chunk, ChunkStore};
 
@@ -46,17 +48,21 @@ fn chunks(
     })
 }
 
+/// Rewrite a parquet file with arrow-rs using the options of a `de.formats.Parquet` instance.
 #[pyfunction]
-#[pyo3(signature = (src_path, dest_path, batch_size = 1024 * 1024, cdc = false, compression = None))]
 fn rewrite_to_parquet_rs(
     py: Python<'_>,
     src_path: String,
     dest_path: String,
-    batch_size: usize,
-    cdc: bool,
-    compression: Option<String>,
+    options: WriterOptions,
 ) -> PyResult<()> {
-    py.allow_threads(|| _rewrite_to_parquet_rs(src_path, dest_path, batch_size, cdc, compression))
+    py.allow_threads(|| _rewrite_to_parquet_rs(&src_path, &dest_path, &options))
+}
+
+/// Pages of a parquet file in file order, decoded from the page headers.
+#[pyfunction]
+fn parquet_pages(py: Python<'_>, path: String) -> PyResult<Vec<Page>> {
+    py.allow_threads(|| read_pages(&path).map_err(|e| PyRuntimeError::new_err(e.to_string())))
 }
 
 #[pyfunction]
@@ -72,6 +78,7 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(estimate, m)?)?;
     m.add_function(wrap_pyfunction!(chunks, m)?)?;
     m.add_function(wrap_pyfunction!(rewrite_to_parquet_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(parquet_pages, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_xet, m)?)?;
     Ok(())
 }

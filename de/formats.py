@@ -3,10 +3,9 @@ from pathlib import Path
 import re
 import sqlite3
 
-from humanize import naturalsize
 import pyarrow as pa
 import pyarrow.parquet as pq
-from typing import Optional
+from typing import Iterator, Optional
 import tempfile
 from de.core import rewrite_to_parquet_rs
 
@@ -16,6 +15,14 @@ class CdcParams:
     min_chunk_size: int
     max_chunk_size: int
     norm_level: int
+
+
+def exact_size(n: int) -> str:
+    """Render a count with a binary unit only when it is exact: 65536 -> 64Ki, 300000 -> 300000."""
+    for unit, scale in (("Gi", 2**30), ("Mi", 2**20), ("Ki", 2**10)):
+        if n >= scale and n % scale == 0:
+            return f"{n // scale}{unit}"
+    return str(n)
 
 
 @dataclass(frozen=True)
@@ -43,126 +50,137 @@ class FileFormat:
             stem = name
         return directory / f"{stem}.{self.suffix}"
 
-    def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
+    def write(
+        self,
+        name: str,
+        src: pa.Table | Path,
+        directory: Path,
+        sanity_check: bool = True,
+    ) -> Path:
         """Write a PyArrow table or rewrite a source parquet file to the derived path."""
         raise NotImplementedError
 
 
 @dataclass(frozen=True)
-class ParquetCpp(FileFormat):
-    name = "parquet-cpp"
+class Parquet(FileFormat):
+    """Writer-agnostic parquet parameters, subclasses drive one writer implementation.
+
+    With `batch_size=None` the whole source is written with a single write call
+    (e.g. `pq.write_table`), otherwise it is streamed in batches of exactly
+    `batch_size` rows, one write call per batch.
+    """
+
     suffix = "parquet"
     use_cdc: bool | CdcParams
     compression: Optional[str] = None
     use_dictionary: bool = True
-    data_page_size: Optional[int] = None
     row_group_size: Optional[int] = None
+    data_page_size: Optional[int] = None
+    max_rows_per_page: Optional[int] = None
+    batch_size: Optional[int] = None
 
     @property
     def paramstem(self) -> str:
         parts = []
         if self.compression is not None:
             parts.append(self.compression)
-        if self.use_cdc:
-            parts.append("cdc")
-        if self.row_group_size is not None:
-            size = (
-                naturalsize(self.row_group_size, binary=True, format="%.0f")
-                .removesuffix("B")
-                .replace(" ", "")
-            )
-            parts.append(f"rg={size}")
-        if self.data_page_size is not None:
-            size = (
-                naturalsize(self.data_page_size, binary=True, format="%.0f")
-                .removesuffix("B")
-                .replace(" ", "")
-            )
-            parts.append(f"dp={size}")
-        return " ".join(parts)
-
-    def _write_kwargs(self) -> dict:
-        kwargs: dict = {
-            "use_dictionary": self.use_dictionary,
-            "compression": self.compression,
-        }
         if isinstance(self.use_cdc, CdcParams):
-            kwargs["use_content_defined_chunking"] = asdict(self.use_cdc)
-        else:
-            kwargs["use_content_defined_chunking"] = self.use_cdc
-
+            cdc = self.use_cdc
+            parts.append(
+                f"cdc={exact_size(cdc.min_chunk_size)}-{exact_size(cdc.max_chunk_size)}"
+                f"-n{cdc.norm_level}"
+            )
+        elif self.use_cdc:
+            parts.append("cdc")
+        if not self.use_dictionary:
+            parts.append("nodict")
+        if self.row_group_size is not None:
+            parts.append(f"rg={exact_size(self.row_group_size)}")
         if self.data_page_size is not None:
-            kwargs["data_page_size"] = self.data_page_size
-        return kwargs
+            parts.append(f"dp={exact_size(self.data_page_size)}")
+        if self.max_rows_per_page is not None:
+            parts.append(f"rpp={exact_size(self.max_rows_per_page)}")
+        if self.batch_size is not None:
+            parts.append(f"stream={exact_size(self.batch_size)}")
+        return " ".join(parts)
 
     def write(
         self,
         name: str,
         src: pa.Table | Path,
         directory: Path,
-        block_size: int = 1024 * 1024,
         sanity_check: bool = True,
-        **kwargs,
     ) -> Path:
         dest = self.derive_path(name, directory)
-        kwargs = self._write_kwargs()
-        if isinstance(src, Path):
-            with pq.ParquetFile(src) as pf:
-                schema = pf.schema.to_arrow_schema()
-                writer = pq.ParquetWriter(dest, schema, **kwargs)
-                for batch in pf.iter_batches(batch_size=block_size):
-                    writer.write(batch, row_group_size=self.row_group_size)
-                writer.close()
-            if sanity_check:
-                src_meta = pq.ParquetFile(src).metadata
-                dst_meta = pq.ParquetFile(dest).metadata
+        self._write(src, dest)
+        if sanity_check:
+            if isinstance(src, Path):
+                src_meta = pq.read_metadata(src)
+                dst_meta = pq.read_metadata(dest)
                 assert src_meta.num_rows == dst_meta.num_rows
                 assert (
                     src_meta.schema.to_arrow_schema()
                     == dst_meta.schema.to_arrow_schema()
                 )
-        else:
-            if self.row_group_size is not None:
-                kwargs["row_group_size"] = self.row_group_size
-            pq.write_table(src, dest, **kwargs)
-            if sanity_check:
+            else:
                 assert src.equals(pq.read_table(dest))
         return dest
 
+    def _write(self, src: pa.Table | Path, dest: Path) -> None:
+        raise NotImplementedError
+
+
+def _batches(
+    src: pa.Table | Path, batch_size: int
+) -> Iterator[pa.RecordBatch | pa.Table]:
+    """Batches of exactly batch_size rows (except the last), independent of the source layout."""
+    if isinstance(src, Path):
+        yield from pq.ParquetFile(src).iter_batches(batch_size=batch_size)
+    else:
+        for offset in range(0, len(src), batch_size):
+            yield src.slice(offset, batch_size).combine_chunks()
+
 
 @dataclass(frozen=True)
-class ParquetRs(FileFormat):
-    name = "parquet-rs"
-    suffix = "parquet"
-    use_cdc: bool | CdcParams
-    compression: Optional[str] = None
+class ParquetCpp(Parquet):
+    name = "parquet-cpp"
 
-    @property
-    def paramstem(self) -> str:
-        parts = []
-        if self.compression is not None:
-            parts.append(self.compression)
-        if self.use_cdc:
-            parts.append("cdc")
-        return " ".join(parts)
-
-    def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
+    def _write(self, src: pa.Table | Path, dest: Path) -> None:
         if isinstance(self.use_cdc, CdcParams):
-            raise ValueError("CDC parameters are not supported by ParquetRs format.")
-
-        use_cdc = bool(self.use_cdc)
-        dest = self.derive_path(name, directory)
-        if isinstance(src, Path):
-            rewrite_to_parquet_rs(
-                str(src), str(dest), cdc=use_cdc, compression=self.compression
-            )
+            cdc: bool | dict = asdict(self.use_cdc)
         else:
-            with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
-                pq.write_table(src, tmp.name)
-                rewrite_to_parquet_rs(
-                    tmp.name, str(dest), cdc=use_cdc, compression=self.compression
-                )
-        return dest
+            cdc = self.use_cdc
+        kwargs = dict(
+            compression=self.compression,
+            use_dictionary=self.use_dictionary,
+            use_content_defined_chunking=cdc,
+            data_page_size=self.data_page_size,
+            max_rows_per_page=self.max_rows_per_page,
+        )
+        if self.batch_size is None:
+            table = (
+                pq.read_table(src).combine_chunks() if isinstance(src, Path) else src
+            )
+            pq.write_table(table, dest, row_group_size=self.row_group_size, **kwargs)
+        else:
+            schema = pq.read_schema(src) if isinstance(src, Path) else src.schema
+            with pq.ParquetWriter(dest, schema, **kwargs) as writer:
+                for batch in _batches(src, self.batch_size):
+                    writer.write(batch, row_group_size=self.row_group_size)
+
+
+@dataclass(frozen=True)
+class ParquetRs(Parquet):
+    name = "parquet-rs"
+
+    def _write(self, src: pa.Table | Path, dest: Path) -> None:
+        if isinstance(src, Path):
+            rewrite_to_parquet_rs(str(src), str(dest), self)
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "source.parquet"
+                pq.write_table(src, path)
+                rewrite_to_parquet_rs(str(path), str(dest), self)
 
 
 @dataclass(frozen=True)
@@ -175,7 +193,13 @@ class JsonLines(FileFormat):
     def paramstem(self) -> str:
         return self.compression or ""
 
-    def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
+    def write(
+        self,
+        name: str,
+        src: pa.Table | Path,
+        directory: Path,
+        sanity_check: bool = True,
+    ) -> Path:
         path = self.derive_path(name, directory)
         table = pq.read_table(src) if isinstance(src, Path) else src
         table.to_pandas().to_json(
@@ -194,7 +218,13 @@ class Sqlite(FileFormat):
     def paramstem(self) -> str:
         return self.compression or ""
 
-    def write(self, name: str, src: pa.Table | Path, directory: Path, **kwargs) -> Path:
+    def write(
+        self,
+        name: str,
+        src: pa.Table | Path,
+        directory: Path,
+        sanity_check: bool = True,
+    ) -> Path:
         path = self.derive_path(name, directory)
         table = pq.read_table(src) if isinstance(src, Path) else src
         con = sqlite3.connect(path)
