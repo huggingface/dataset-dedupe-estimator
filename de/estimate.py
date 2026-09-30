@@ -1,6 +1,6 @@
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pyarrow as pa
@@ -13,6 +13,8 @@ from .formats import FileFormat
 @dataclass
 class EstimationResult:
     format: FileFormat
+    # written files in input order, the first one is the original
+    paths: list[Path]
     numfiles: int
     total_len: int
     chunk_bytes: int
@@ -39,7 +41,7 @@ def estimate(paths):
 
 
 def compare_formats_tables(
-    formats: list[FileFormat],
+    formats: Sequence[FileFormat],
     tables: dict[str, dict[str, Path | pa.Table]],
     directory: Path | str,
     max_workers: int | None = None,
@@ -55,32 +57,29 @@ def compare_formats_tables(
     directory = Path(directory)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all file writes
-        futures = {}
+        # Submit all file writes, grouped by (table_name, fmt) in input order
+        writes = {}
         for table_name, table in tables.items():
             for fmt in formats:
                 prefix = directory / table_name / fmt.name
                 prefix.mkdir(parents=True, exist_ok=True)
-                for name, value in table.items():
-                    f = executor.submit(
+                writes[(table_name, fmt)] = [
+                    executor.submit(
                         fmt.write, name, value, prefix, sanity_check=sanity_check
                     )
-                    futures[f] = (table_name, fmt)
-
-        # Collect results and group by (table_name, fmt)
-        groups: defaultdict[tuple, list] = defaultdict(list)
-        for future in tqdm(as_completed(futures), total=len(futures)):
-            table_name, fmt = futures[future]
-            groups[(table_name, fmt)].append(future.result())
+                    for name, value in table.items()
+                ]
+        pending = [future for futures in writes.values() for future in futures]
+        for _ in tqdm(as_completed(pending), total=len(pending)):
+            pass
+        groups = {key: [f.result() for f in futures] for key, futures in writes.items()}
 
         # Estimate in parallel for each group
-        keys = list(groups.keys())
-        results = executor.map(estimate, groups.values())
-        estimates = dict(zip(keys, results))
+        estimates = executor.map(estimate, groups.values())
 
     return [
-        EstimationResult(format=fmt, group=table_name, **data)
-        for (table_name, fmt), data in estimates.items()
+        EstimationResult(format=fmt, group=table_name, paths=paths, **data)
+        for ((table_name, fmt), paths), data in zip(groups.items(), estimates)
     ]
 
 
@@ -114,6 +113,11 @@ def compare_formats(
         estimates = executor.map(estimate, path_pairs)
 
     return [
-        EstimationResult(format=contenders[name], group="param-impact", **data)
+        EstimationResult(
+            format=contenders[name],
+            group="param-impact",
+            paths=[baseline_path, contender_paths[name]],
+            **data,
+        )
         for name, data in zip(names, estimates)
     ]

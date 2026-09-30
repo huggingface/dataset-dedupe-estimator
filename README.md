@@ -110,6 +110,59 @@ It also generates a plot comparing the results:
 
 ![Datasets Deduplication Statistics](images/datasets.png)
 
+## Benchmark Parquet Writers
+
+Measure whether the parquet writers keep their content defined chunking state
+across row groups, for both writing a whole table with a single call
+(`pq.write_table`) and streaming it in batches (`pq.ParquetWriter`):
+
+```bash
+❯ de bench runs/stock
+```
+
+This generates 16Mi rows of `{"a": "int"}` into `runs/stock/sources` together
+with versions having 10×10 rows inserted and deleted. Then every writer
+(`parquet-cpp` via pyarrow, `parquet-rs` via arrow-rs) rewrites them with row
+groups of 1Mi, 256Ki and 64Ki rows, and streamed in batches of 100000 rows.
+It shows three tables:
+
+- page cuts against each writer's single row group file without page size
+  limits: a writer keeping its chunker state across row groups reproduces all of
+  those cuts (recall 100%, extra 0, aligned 100%, resync 0)
+- deduplication of the original with its inserted and deleted versions, for
+  PLAIN and dictionary encoding and without CDC as a baseline
+- page cuts of the same data written by different implementations
+
+Results are saved to `runs/stock/results.json`. To compare with another
+environment, for example a pyarrow built from a different Arrow branch, reuse
+the same sources there and compare the runs:
+
+```bash
+❯ de bench runs/cdc-branch --sources runs/stock/sources --writer parquet-cpp
+❯ de compare runs/stock runs/cdc-branch
+```
+
+A single edit early in a larger file, e.g. 10 rows inserted and deleted at 24.9%
+of a ~1GB file with 13 to 3200 row groups, shifting three quarters of the data.
+The page cut profiles need a single row group oracle which pyarrow limits to 64Mi
+rows, so only the deduplication profiles are run:
+
+```bash
+❯ de bench runs-1g/stock --num-rows 209715200 --edit-point 0.249 \
+    --row-group-size 16777216 --row-group-size 4194304 --row-group-size 1048576 \
+    --row-group-size 262144 --row-group-size 65536 \
+    --profile default --profile dict --profile nocdc --max-workers 8
+```
+
+Show the exact pages of a file, or compare the pages of two files:
+
+```bash
+❯ de pages runs/stock/cut/original/parquet-cpp/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet
+❯ de page-diff \
+    runs/stock/cut/original/parquet-cpp/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet \
+    runs/stock/cut/original/parquet-rs/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet
+```
+
 
 # Results on Synthetic Data
 

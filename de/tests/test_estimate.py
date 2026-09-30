@@ -116,8 +116,34 @@ class TestCompareFormatsTables:
         assert results[0].group == "combined"
         assert results[0].format.paramstem == ""
 
+    def test_paths_in_input_order(self, tmp_path, table, edit):
+        formats = [ParquetCpp(use_cdc=False), ParquetCpp(use_cdc=True)]
+        results = compare_formats_tables(
+            formats,
+            {"b": {"original": table, "b": edit}, "a": {"original": table, "a": edit}},
+            tmp_path,
+        )
+        assert [(r.group, r.format) for r in results] == [
+            ("b", formats[0]),
+            ("b", formats[1]),
+            ("a", formats[0]),
+            ("a", formats[1]),
+        ]
+        for r in results:
+            assert r.paths == [
+                r.format.derive_path(name, tmp_path / r.group / r.format.name)
+                for name in ("original", r.group)
+            ]
+
 
 class TestCompareFormats:
+    def test_paths_are_baseline_and_contender(self, tmp_path, table):
+        contender = ParquetCpp(use_cdc=False, compression="zstd")
+        [result] = compare_formats(
+            ParquetCpp(use_cdc=False), {"v1": contender}, table, tmp_path
+        )
+        assert [p.name for p in result.paths] == ["baseline.parquet", "v1-zstd.parquet"]
+
     def test_one_record_per_variant(self, tmp_path, table):
         contenders = {
             "v1": ParquetCpp(use_cdc=False, compression="zstd"),
