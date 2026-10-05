@@ -6,6 +6,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from de.bench import (
+    DEFAULT_WRITERS,
     WRITERS,
     compare_runs,
     load_sources,
@@ -18,6 +19,7 @@ from de.formats import CdcParams
 CDC = CdcParams(min_chunk_size=8 * 1024, max_chunk_size=32 * 1024, norm_level=0)
 SCHEMA = {"a": "int"}
 NUM_ROWS = 20_000
+DEFAULTS = [WRITERS[name] for name in DEFAULT_WRITERS]
 EDIT_POINTS = [0.25, 0.75]
 
 
@@ -35,7 +37,7 @@ def sources(tmp_path_factory):
 @pytest.fixture(scope="module")
 def first_run(sources, tmp_path_factory):
     run_dir = tmp_path_factory.mktemp("run")
-    return run_dir, run(run_dir, sources, small_matrix(list(WRITERS.values())))
+    return run_dir, run(run_dir, sources, small_matrix(DEFAULTS))
 
 
 class TestSources:
@@ -80,9 +82,7 @@ class TestSources:
 
 class TestMatrix:
     def test_profiles(self):
-        profiles = matrix(
-            list(WRITERS.values()), NUM_ROWS, CDC, "snappy", [5000, 2000], [3000]
-        )
+        profiles = matrix(DEFAULTS, NUM_ROWS, CDC, "snappy", [5000, 2000], [3000])
         counts = {profile: len(formats) for profile, formats in profiles.items()}
         assert counts == {"cut": 8, "aligned": 4, "default": 6, "dict": 2, "nocdc": 2}
         for formats in profiles.values():
@@ -95,12 +95,24 @@ class TestMatrix:
 
     def test_oracle_needs_a_single_row_group(self):
         with pytest.raises(AssertionError):
-            matrix(list(WRITERS.values()), 65 * 2**20, CDC, "snappy", [2**20], [])
+            matrix(DEFAULTS, 65 * 2**20, CDC, "snappy", [2**20], [])
+
+    def test_writers_without_streaming(self):
+        profiles = matrix(
+            [WRITERS["parquet-java"]],
+            NUM_ROWS,
+            CDC,
+            "snappy",
+            [5000],
+            [3000],
+            ["default"],
+        )
+        assert [f.batch_size for f in profiles["default"]] == [None]
 
     def test_selected_profiles(self):
         # deduplication profiles don't need an oracle, so any size is fine
         profiles = matrix(
-            list(WRITERS.values()),
+            DEFAULTS,
             200 * 2**20,
             CDC,
             "snappy",
@@ -130,7 +142,7 @@ class TestRun:
         assert json.loads((run_dir / "results.json").read_text()) == results
         environment = results["environment"]
         assert environment["pyarrow"] == pa.__version__
-        assert set(environment["created_by"]) == set(WRITERS)
+        assert set(environment["created_by"]) == set(DEFAULT_WRITERS)
         for cell in results["cells"]:
             for path in cell["files"]:
                 assert (run_dir / path).exists()

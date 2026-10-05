@@ -12,6 +12,7 @@ import plotly.graph_objects as go
 
 from . import display
 from .bench import (
+    DEFAULT_WRITERS,
     PROFILES,
     WRITERS,
     compare_runs,
@@ -407,7 +408,7 @@ def param_impact(ctx, file, directory, row_group_size, data_page_size):
     "writers",
     multiple=True,
     type=click.Choice(list(WRITERS)),
-    default=tuple(WRITERS),
+    default=DEFAULT_WRITERS,
     help="Writer implementation, repeatable",
 )
 @click.option(

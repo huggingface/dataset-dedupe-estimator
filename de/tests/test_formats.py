@@ -1,6 +1,7 @@
 from dataclasses import fields, replace
 import gzip
 import json
+import os
 import sqlite3
 import tempfile
 
@@ -8,7 +9,15 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from de.formats import CdcParams, JsonLines, Parquet, ParquetCpp, ParquetRs, Sqlite
+from de.formats import (
+    CdcParams,
+    JsonLines,
+    Parquet,
+    ParquetCpp,
+    ParquetJava,
+    ParquetRs,
+    Sqlite,
+)
 from de.synthetic import DataGenerator
 
 
@@ -218,6 +227,44 @@ class TestParquet:
         fmt = writer(use_cdc=CDC, use_dictionary=False, batch_size=batch_size)
         path = fmt.write("out", data, tmp_path)
         assert pq.read_table(path).equals(data)
+
+
+needs_java = pytest.mark.skipif(
+    not os.environ.get("PARQUET_JAVA_CLASSPATH"),
+    reason="PARQUET_JAVA_CLASSPATH is not set",
+)
+
+
+@needs_java
+class TestParquetJava:
+    def test_row_groups(self, tmp_path):
+        big_table = pa.table({"x": list(range(100))})
+        path = ParquetJava(use_cdc=False, row_group_size=30).write(
+            "out", big_table, tmp_path
+        )
+        assert row_group_sizes(path) == [30, 30, 30, 10]
+        assert pq.read_metadata(path).created_by.startswith("parquet-mr")
+
+    def test_table_and_path_sources_are_identical(self, tmp_path):
+        data = DataGenerator({"a": "int", "b": "str"}).generate_table(500)
+        src = tmp_path / "src.parquet"
+        pq.write_table(data, src, row_group_size=7)
+        fmt = ParquetJava(use_cdc=CDC, compression="snappy", row_group_size=100)
+        from_table = fmt.write("table", data, tmp_path)
+        from_path = fmt.write("path", src, tmp_path)
+        assert from_table.read_bytes() == from_path.read_bytes()
+
+    def test_nested_schema_round_trips(self, tmp_path):
+        schema = {"a": "int", "b": "str", "c": ["int"], "d": {"x": "float"}}
+        data = DataGenerator(schema).generate_table(1000)
+        path = ParquetJava(use_cdc=CDC, use_dictionary=False).write(
+            "out", data, tmp_path
+        )
+        assert pq.read_table(path).equals(data)
+
+    def test_streaming_is_not_supported(self, tmp_path, table):
+        with pytest.raises(ValueError, match="no write calls"):
+            ParquetJava(use_cdc=False, batch_size=10).write("out", table, tmp_path)
 
 
 class TestJsonLines:

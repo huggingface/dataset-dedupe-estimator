@@ -22,11 +22,17 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .estimate import compare_formats_tables
-from .formats import CdcParams, Parquet, ParquetCpp, ParquetRs, exact_size
+from .formats import CdcParams, Parquet, ParquetCpp, ParquetJava, ParquetRs, exact_size
 from .pages import Layout, PageDiff, compare, persistence
 from .synthetic import DataGenerator
 
-WRITERS: dict[str, type[Parquet]] = {"parquet-cpp": ParquetCpp, "parquet-rs": ParquetRs}
+WRITERS: dict[str, type[Parquet]] = {
+    "parquet-cpp": ParquetCpp,
+    "parquet-rs": ParquetRs,
+    "parquet-java": ParquetJava,
+}
+# parquet-java needs PARQUET_JAVA_CLASSPATH, so it is opt-in
+DEFAULT_WRITERS = ("parquet-cpp", "parquet-rs")
 EDITS = ("inserted", "deleted")
 SEED = 42
 # pyarrow caps row groups at 64Mi rows, the oracle must fit into a single one
@@ -139,9 +145,10 @@ def matrix(
     )
 
     def layouts(writer: type[Parquet], **params) -> list[Parquet]:
+        streamed = batch_sizes if writer.streaming else []
         return [writer(row_group_size=size, **params) for size in row_group_sizes] + [
             writer(row_group_size=largest, batch_size=size, **params)
-            for size in batch_sizes
+            for size in streamed
         ]
 
     formats: dict[str, list[Parquet]] = defaultdict(list)

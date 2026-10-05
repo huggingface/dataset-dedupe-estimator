@@ -154,6 +154,16 @@ rows, so only the deduplication profiles are run:
     --profile default --profile dict --profile nocdc --max-workers 8
 ```
 
+parquet-java is opt-in: `de/java/ParquetRewrite.java` rewrites the sources with it
+and needs the classpath of parquet-hadoop, e.g. from a parquet-java checkout:
+
+```bash
+❯ ./mvnw -q -DskipTests -pl parquet-hadoop -am package dependency:build-classpath \
+    -Dmdep.outputFile=cp.txt -Dmdep.includeScope=compile
+❯ export PARQUET_JAVA_CLASSPATH=$PWD/parquet-hadoop/target/parquet-hadoop-1.19.0-SNAPSHOT.jar:$(cat parquet-hadoop/cp.txt)
+❯ de bench runs/java --writer parquet-cpp --writer parquet-rs --writer parquet-java
+```
+
 Show the exact pages of a file, or compare the pages of two files:
 
 ```bash

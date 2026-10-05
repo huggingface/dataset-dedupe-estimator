@@ -1,8 +1,10 @@
+import os
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from de.formats import CdcParams, ParquetCpp, ParquetRs
+from de.formats import CdcParams, ParquetCpp, ParquetJava, ParquetRs
 from de.pages import Layout, Persistence, compare, persistence
 from de.synthetic import DataGenerator
 
@@ -197,3 +199,15 @@ class TestPersistence:
         rs_cuts = Layout.read(rs.write("rs", ints, tmp_path)).cuts(0)
         assert len(cpp_cuts) > 10
         assert cpp_cuts == rs_cuts
+
+    @pytest.mark.skipif(
+        not os.environ.get("PARQUET_JAVA_CLASSPATH"),
+        reason="PARQUET_JAVA_CLASSPATH is not set",
+    )
+    def test_java_cdc_cuts_match_cpp(self, tmp_path, ints):
+        cpp = without_page_limits(ParquetCpp, row_group_size=len(ints))
+        java = without_page_limits(ParquetJava, row_group_size=len(ints))
+        cpp_cuts = Layout.read(cpp.write("cpp", ints, tmp_path)).cuts(0)
+        java_cuts = Layout.read(java.write("java", ints, tmp_path)).cuts(0)
+        assert len(cpp_cuts) > 10
+        assert java_cuts == cpp_cuts
