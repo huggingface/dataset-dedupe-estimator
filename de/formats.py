@@ -1,11 +1,14 @@
+from contextlib import contextmanager
 from dataclasses import dataclass, asdict
+import os
 from pathlib import Path
 import re
 import sqlite3
+import subprocess
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from typing import Iterator, Optional
+from typing import ClassVar, Iterator, Optional
 import tempfile
 from de.core import rewrite_to_parquet_rs
 
@@ -71,6 +74,8 @@ class Parquet(FileFormat):
     """
 
     suffix = "parquet"
+    # whether the implementation can write the source in batches
+    streaming: ClassVar[bool] = True
     use_cdc: bool | CdcParams
     compression: Optional[str] = None
     use_dictionary: bool = True
@@ -169,18 +174,70 @@ class ParquetCpp(Parquet):
                     writer.write(batch, row_group_size=self.row_group_size)
 
 
+@contextmanager
+def _source_file(src: pa.Table | Path) -> Iterator[Path]:
+    """The source as a parquet file, a table is written to a temporary one."""
+    if isinstance(src, Path):
+        yield src
+    else:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source.parquet"
+            pq.write_table(src, path)
+            yield path
+
+
 @dataclass(frozen=True)
 class ParquetRs(Parquet):
     name = "parquet-rs"
 
     def _write(self, src: pa.Table | Path, dest: Path) -> None:
-        if isinstance(src, Path):
-            rewrite_to_parquet_rs(str(src), str(dest), self)
+        with _source_file(src) as path:
+            rewrite_to_parquet_rs(str(path), str(dest), self)
+
+
+@dataclass(frozen=True)
+class ParquetJava(Parquet):
+    """parquet-java, through the java/ParquetRewrite.java program.
+
+    PARQUET_JAVA_CLASSPATH must hold parquet-hadoop and its dependencies.
+    parquet-java writes record by record, there are no write calls to batch,
+    so streaming isn't supported.
+    """
+
+    name = "parquet-java"
+    streaming = False
+
+    def _write(self, src: pa.Table | Path, dest: Path) -> None:
+        if self.batch_size is not None:
+            raise ValueError("parquet-java has no write calls to stream batches with")
+        classpath = os.environ.get("PARQUET_JAVA_CLASSPATH")
+        if not classpath:
+            raise RuntimeError("set PARQUET_JAVA_CLASSPATH to use parquet-java")
+        if isinstance(self.use_cdc, CdcParams):
+            cdc = self.use_cdc
+            use_cdc = f"{cdc.min_chunk_size},{cdc.max_chunk_size},{cdc.norm_level}"
         else:
-            with tempfile.TemporaryDirectory() as tmp:
-                path = Path(tmp) / "source.parquet"
-                pq.write_table(src, path)
-                rewrite_to_parquet_rs(str(path), str(dest), self)
+            use_cdc = str(self.use_cdc).lower()
+        options = dict(
+            use_cdc=use_cdc,
+            compression=self.compression,
+            use_dictionary=str(self.use_dictionary).lower(),
+            row_group_size=self.row_group_size,
+            data_page_size=self.data_page_size,
+            max_rows_per_page=self.max_rows_per_page,
+        )
+        program = Path(__file__).parent / "java" / "ParquetRewrite.java"
+        with _source_file(src) as path:
+            subprocess.run(
+                ["java", "-cp", classpath, str(program), str(path), str(dest)]
+                + [
+                    f"{key}={value}"
+                    for key, value in options.items()
+                    if value is not None
+                ],
+                check=True,
+                capture_output=True,
+            )
 
 
 @dataclass(frozen=True)

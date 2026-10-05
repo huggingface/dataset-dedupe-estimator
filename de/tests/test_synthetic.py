@@ -1,5 +1,6 @@
 import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pytest
 
 from de.synthetic import DataGenerator, generate_array
@@ -20,7 +21,8 @@ def table(gen):
 
 class TestDeterminism:
     @pytest.mark.parametrize(
-        "dtype", ["int", "float", "str", "bool", ["int"], {"x": "int", "y": "str"}]
+        "dtype",
+        ["int", "int64", "float", "str", "bool", ["int"], {"x": "int", "y": "str"}],
     )
     def test_same_seed_same_output(self, dtype):
         a = generate_array(np.random.default_rng(0), dtype, 20)
@@ -38,6 +40,12 @@ class TestGenerateArray:
     def test_int(self):
         data = generate_array(np.random.default_rng(0), "int", 10)
         assert len(data) == 10
+
+    def test_int64_spans_the_full_range(self):
+        data = generate_array(np.random.default_rng(0), "int64", 10_000)
+        assert data.type == pa.int64()
+        assert pc.min(data).as_py() < -(2**62)
+        assert pc.max(data).as_py() > 2**62
 
     def test_float(self):
         data = generate_array(np.random.default_rng(0), "float", 10)
