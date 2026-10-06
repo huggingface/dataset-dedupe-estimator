@@ -6,9 +6,29 @@ import pytest
 
 from de.formats import CdcParams, ParquetCpp, ParquetJava, ParquetRs
 from de.pages import Layout, Persistence, compare, persistence
-from de.synthetic import DataGenerator
+from de.synthetic import DataGenerator, evenly_spaced
 
 CDC = CdcParams(min_chunk_size=8 * 1024, max_chunk_size=32 * 1024, norm_level=0)
+
+# a flat, a variable length, a list, a struct and a constant leaf column
+SCHEMA = {"a": "int", "b": "str", "c": ["int"], "d": {"x": "float"}, "z": "zeros"}
+
+WRITERS = [
+    ParquetCpp,
+    ParquetRs,
+    pytest.param(
+        ParquetJava,
+        marks=pytest.mark.skipif(
+            not os.environ.get("PARQUET_JAVA_CLASSPATH"),
+            reason="PARQUET_JAVA_CLASSPATH is not set",
+        ),
+    ),
+]
+
+# the first chunk boundary of column a, a row group ending right before or at it
+# exercises the size, match and hash state the chunker carries over
+FIRST_CUT = 1674
+ROW_GROUP_SIZES = [30_011, 7_001, FIRST_CUT - 1, FIRST_CUT]
 
 
 @pytest.fixture(scope="module")
@@ -16,9 +36,28 @@ def ints():
     return DataGenerator({"a": "int"}).generate_table(200_000)
 
 
-def without_page_limits(writer, **kwargs):
+@pytest.fixture(scope="module")
+def table():
+    return DataGenerator(SCHEMA).generate_table(100_000)
+
+
+@pytest.fixture(scope="module", params=WRITERS, ids=lambda writer: writer.name)
+def writer(request):
+    return request.param
+
+
+@pytest.fixture(scope="module")
+def oracle(writer, table, tmp_path_factory):
+    """A single row group without page limits, its cuts are the CDC chunk boundaries."""
+    fmt = without_page_limits(writer, row_group_size=len(table))
+    layout = Layout.read(fmt.write("oracle", table, tmp_path_factory.mktemp("oracle")))
+    assert layout.cuts(0)[0] == FIRST_CUT
+    return layout
+
+
+def without_page_limits(writer, use_cdc=CDC, **kwargs):
     return writer(
-        use_cdc=CDC,
+        use_cdc=use_cdc,
         use_dictionary=False,
         data_page_size=2**30,
         max_rows_per_page=2**30,
@@ -181,17 +220,6 @@ class TestPersistence:
         assert (result.recall, result.extra, result.aligned) == (1.0, 0, 1.0)
         assert result.empty == 1
 
-    def test_arrow_rs_keeps_state_across_row_groups(self, tmp_path, ints):
-        oracle = without_page_limits(ParquetRs, row_group_size=len(ints))
-        layout = without_page_limits(ParquetRs, row_group_size=30_000)
-        [result] = persistence(
-            Layout.read(layout.write("layout", ints, tmp_path)),
-            Layout.read(oracle.write("oracle", ints, tmp_path)),
-        )
-        assert result == Persistence(
-            column=0, recall=1.0, extra=0, aligned=1.0, resync=0.0, empty=0
-        )
-
     def test_arrow_rs_stream_matches_single_shot(self, tmp_path, ints):
         single = without_page_limits(ParquetRs, row_group_size=30_000)
         stream = without_page_limits(ParquetRs, row_group_size=30_000, batch_size=7000)
@@ -200,23 +228,84 @@ class TestPersistence:
             == stream.write("stream", ints, tmp_path).read_bytes()
         )
 
+
+class TestContentDefinedChunking:
+    def test_no_cuts_without_cdc(self, tmp_path, writer, table):
+        fmt = without_page_limits(writer, use_cdc=False, row_group_size=len(table))
+        layout = Layout.read(fmt.write("nocdc", table, tmp_path))
+        assert [layout.cuts(column) for column in layout.columns] == [[]] * len(SCHEMA)
+
+    def test_chunk_sizes(self, oracle):
+        # a nullable int64 column hashes 8 value and 2 definition level bytes per
+        # row, the row reaching a chunk size limit is hashed into the chunk but
+        # starts the next page
+        row_bytes = 10
+        *pages, _ = [span.end - span.start for span in oracle.spans(0)]
+        for num_rows in pages:
+            assert CDC.min_chunk_size <= row_bytes * (num_rows + 1)
+            assert row_bytes * (num_rows - 1) < CDC.max_chunk_size
+        # the constant column never matches the gear hash, only the size limit cuts
+        forced = -(-CDC.max_chunk_size // row_bytes)
+        *pages, _ = [span.end - span.start for span in oracle.spans(4)]
+        assert pages == [forced - 1] + [forced] * (len(pages) - 1)
+
+    def test_edits_change_few_pages(self, tmp_path, writer, table, oracle):
+        points = evenly_spaced(4)
+        inserted = DataGenerator(SCHEMA, seed=1).insert_rows(table, points)
+        fmt = without_page_limits(writer, row_group_size=len(inserted))
+        layout = Layout.read(fmt.write("inserted", inserted, tmp_path))
+        hashes = {page["page_hash"] for page in oracle.pages}
+        new_pages = [
+            sum(page["page_hash"] not in hashes for page in layout.column_pages(column))
+            for column in layout.columns
+        ]
+        # the pages around each edit and the last one, cuts resync on the content
+        assert max(new_pages) <= 2 * len(points) + 1
+
+    def test_cuts_match_parquet_cpp(self, tmp_path, table, oracle):
+        fmt = without_page_limits(ParquetCpp, row_group_size=len(table))
+        cpp = Layout.read(fmt.write("cpp", table, tmp_path))
+        assert [oracle.cuts(c) for c in oracle.columns] == [
+            cpp.cuts(c) for c in cpp.columns
+        ]
+
     @pytest.mark.parametrize(
-        "writer",
-        [
-            ParquetRs,
-            pytest.param(
-                ParquetJava,
-                marks=pytest.mark.skipif(
-                    not os.environ.get("PARQUET_JAVA_CLASSPATH"),
-                    reason="PARQUET_JAVA_CLASSPATH is not set",
-                ),
-            ),
-        ],
+        "row_group_size, batch_size",
+        [(size, None) for size in ROW_GROUP_SIZES] + [(30_011, 7_001)],
     )
-    def test_cdc_cuts_match_across_implementations(self, tmp_path, ints, writer):
-        cpp = without_page_limits(ParquetCpp, row_group_size=len(ints))
-        other = without_page_limits(writer, row_group_size=len(ints))
-        cpp_cuts = Layout.read(cpp.write("cpp", ints, tmp_path)).cuts(0)
-        other_cuts = Layout.read(other.write("other", ints, tmp_path)).cuts(0)
-        assert len(cpp_cuts) > 10
-        assert other_cuts == cpp_cuts
+    def test_chunking_carries_over_row_groups(
+        self, tmp_path, writer, table, oracle, row_group_size, batch_size
+    ):
+        if batch_size is not None and not writer.streaming:
+            pytest.skip(f"{writer.name} can't stream")
+        fmt = without_page_limits(
+            writer, row_group_size=row_group_size, batch_size=batch_size
+        )
+        layout = Layout.read(fmt.write("layout", table, tmp_path))
+        assert all(layout.row_group_starts(c) for c in layout.columns)
+        assert persistence(layout, oracle) == [
+            Persistence(column=c, recall=1.0, extra=0, aligned=1.0, resync=0.0, empty=0)
+            for c in layout.columns
+        ]
+
+    @pytest.mark.parametrize("row_group_size", ROW_GROUP_SIZES)
+    def test_resetting_chunkers_would_be_caught(self, tmp_path, table, row_group_size):
+        """Chunkers reset at every row group miss oracle cuts in every column.
+
+        The reset layout concatenates the pages of the row groups written as
+        separate files, so a fresh chunker starts at each row group.
+        """
+        fmt = without_page_limits(ParquetRs, row_group_size=len(table))
+        oracle = Layout.read(fmt.write("oracle", table, tmp_path))
+        paths = [
+            fmt.write(f"rg{i}", table.slice(start, row_group_size), tmp_path)
+            for i, start in enumerate(range(0, len(table), row_group_size))
+        ]
+        reset = Layout(
+            [
+                dict(page, row_group=i)
+                for i, path in enumerate(paths)
+                for page in Layout.read(path).pages
+            ]
+        )
+        assert all(r.recall < 1 or r.extra > 0 for r in persistence(reset, oracle))
