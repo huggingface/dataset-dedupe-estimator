@@ -118,6 +118,9 @@ def generate_array(rng, dtype, num_samples):
         return pa.array(
             rng.integers(info.min, info.max, size=num_samples, endpoint=True)
         )
+    elif dtype in ("zeros",):
+        # constant, so content defined chunking can only cut at the max chunk size
+        return pa.array(np.zeros(num_samples, dtype=np.int64))
     elif dtype in ("float", float):
         return pa.array(rng.uniform(0, 1_000_000, size=num_samples).round(3))
     elif dtype in ("str", str):
