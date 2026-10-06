@@ -32,8 +32,6 @@ pub struct Page {
     pub uncompressed_bytes: usize,
     /// Number of levels (values including nulls) for data pages, entries for dictionary pages.
     pub num_values: usize,
-    /// Hash of the (compressed) page payload.
-    pub payload_hash: u64,
     /// Hash of the header and payload, the bytes a content addressed store sees.
     pub page_hash: u64,
 }
@@ -103,7 +101,6 @@ pub fn read_pages(path: &str) -> Result<Vec<Page>> {
                     compressed_bytes: header.compressed_page_size as usize,
                     uncompressed_bytes: header.uncompressed_page_size as usize,
                     num_values: num_values as usize,
-                    payload_hash: xxh3_64(&bytes[offset + header_bytes..end]),
                     page_hash: xxh3_64(&bytes[offset..end]),
                 });
                 offset = end;

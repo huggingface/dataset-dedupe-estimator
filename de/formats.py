@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 from dataclasses import dataclass, asdict
 import os
 from pathlib import Path
@@ -8,7 +7,7 @@ import subprocess
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from typing import ClassVar, Iterator, Optional
+from typing import ClassVar, Iterable, Optional
 import tempfile
 from de.core import rewrite_to_parquet_rs
 
@@ -84,6 +83,10 @@ class Parquet(FileFormat):
     max_rows_per_page: Optional[int] = None
     batch_size: Optional[int] = None
 
+    def __post_init__(self):
+        if self.batch_size is not None and not self.streaming:
+            raise ValueError(f"{self.name} has no write calls to stream batches with")
+
     @property
     def paramstem(self) -> str:
         parts = []
@@ -132,18 +135,21 @@ class Parquet(FileFormat):
         return dest
 
     def _write(self, src: pa.Table | Path, dest: Path) -> None:
+        """Rewrite the source file, a table is written to a temporary file first.
+
+        Implementations that can write tables directly override this instead of
+        `_rewrite`.
+        """
+        if isinstance(src, Path):
+            self._rewrite(src, dest)
+        else:
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "source.parquet"
+                pq.write_table(src, path)
+                self._rewrite(path, dest)
+
+    def _rewrite(self, src: Path, dest: Path) -> None:
         raise NotImplementedError
-
-
-def _batches(
-    src: pa.Table | Path, batch_size: int
-) -> Iterator[pa.RecordBatch | pa.Table]:
-    """Batches of exactly batch_size rows (except the last), independent of the source layout."""
-    if isinstance(src, Path):
-        yield from pq.ParquetFile(src).iter_batches(batch_size=batch_size)
-    else:
-        for offset in range(0, len(src), batch_size):
-            yield src.slice(offset, batch_size).combine_chunks()
 
 
 @dataclass(frozen=True)
@@ -163,36 +169,34 @@ class ParquetCpp(Parquet):
             max_rows_per_page=self.max_rows_per_page,
         )
         if self.batch_size is None:
-            table = (
-                pq.read_table(src).combine_chunks() if isinstance(src, Path) else src
-            )
-            pq.write_table(table, dest, row_group_size=self.row_group_size, **kwargs)
+            if isinstance(src, Path):
+                src = pq.read_table(src).combine_chunks()
+            pq.write_table(src, dest, row_group_size=self.row_group_size, **kwargs)
+            return
+
+        # batches of exactly batch_size rows, independent of the source's layout
+        size = self.batch_size
+        batches: Iterable[pa.RecordBatch | pa.Table]
+        if isinstance(src, Path):
+            source = pq.ParquetFile(src)
+            schema, batches = source.schema_arrow, source.iter_batches(batch_size=size)
         else:
-            schema = pq.read_schema(src) if isinstance(src, Path) else src.schema
-            with pq.ParquetWriter(dest, schema, **kwargs) as writer:
-                for batch in _batches(src, self.batch_size):
-                    writer.write(batch, row_group_size=self.row_group_size)
-
-
-@contextmanager
-def _source_file(src: pa.Table | Path) -> Iterator[Path]:
-    """The source as a parquet file, a table is written to a temporary one."""
-    if isinstance(src, Path):
-        yield src
-    else:
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "source.parquet"
-            pq.write_table(src, path)
-            yield path
+            schema = src.schema
+            batches = (
+                src.slice(offset, size).combine_chunks()
+                for offset in range(0, len(src), size)
+            )
+        with pq.ParquetWriter(dest, schema, **kwargs) as writer:
+            for batch in batches:
+                writer.write(batch, row_group_size=self.row_group_size)
 
 
 @dataclass(frozen=True)
 class ParquetRs(Parquet):
     name = "parquet-rs"
 
-    def _write(self, src: pa.Table | Path, dest: Path) -> None:
-        with _source_file(src) as path:
-            rewrite_to_parquet_rs(str(path), str(dest), self)
+    def _rewrite(self, src: Path, dest: Path) -> None:
+        rewrite_to_parquet_rs(str(src), str(dest), self)
 
 
 @dataclass(frozen=True)
@@ -207,9 +211,7 @@ class ParquetJava(Parquet):
     name = "parquet-java"
     streaming = False
 
-    def _write(self, src: pa.Table | Path, dest: Path) -> None:
-        if self.batch_size is not None:
-            raise ValueError("parquet-java has no write calls to stream batches with")
+    def _rewrite(self, src: Path, dest: Path) -> None:
         classpath = os.environ.get("PARQUET_JAVA_CLASSPATH")
         if not classpath:
             raise RuntimeError("set PARQUET_JAVA_CLASSPATH to use parquet-java")
@@ -227,17 +229,12 @@ class ParquetJava(Parquet):
             max_rows_per_page=self.max_rows_per_page,
         )
         program = Path(__file__).parent / "java" / "ParquetRewrite.java"
-        with _source_file(src) as path:
-            subprocess.run(
-                ["java", "-cp", classpath, str(program), str(path), str(dest)]
-                + [
-                    f"{key}={value}"
-                    for key, value in options.items()
-                    if value is not None
-                ],
-                check=True,
-                capture_output=True,
-            )
+        subprocess.run(
+            ["java", "-cp", classpath, str(program), str(src), str(dest)]
+            + [f"{key}={value}" for key, value in options.items() if value is not None],
+            check=True,
+            capture_output=True,
+        )
 
 
 @dataclass(frozen=True)

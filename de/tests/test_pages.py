@@ -149,6 +149,14 @@ class TestCompare:
         # the 10-row pages [40, 50) and [90, 100) are identical in both files
         assert 0 < diff.new_bytes < diff.right_bytes
 
+    def test_column_missing_on_the_left(self, tmp_path):
+        left, right = tmp_path / "left.parquet", tmp_path / "right.parquet"
+        pq.write_table(pa.table({"a": [1, 2]}), left)
+        pq.write_table(pa.table({"a": [1, 2], "b": ["x", "y"]}), right)
+        diffs = compare(Layout.read(left), Layout.read(right))
+        assert [diff.left_pages for diff in diffs] == [1, 0]
+        assert diffs[1].new_bytes == diffs[1].right_bytes
+
 
 class TestPersistence:
     oracle = layout_of([10, 10, 10, 10])  # cdc cuts 10, 20, 30
@@ -192,22 +200,23 @@ class TestPersistence:
             == stream.write("stream", ints, tmp_path).read_bytes()
         )
 
-    def test_cdc_cuts_match_across_implementations(self, tmp_path, ints):
-        cpp = without_page_limits(ParquetCpp, row_group_size=len(ints))
-        rs = without_page_limits(ParquetRs, row_group_size=len(ints))
-        cpp_cuts = Layout.read(cpp.write("cpp", ints, tmp_path)).cuts(0)
-        rs_cuts = Layout.read(rs.write("rs", ints, tmp_path)).cuts(0)
-        assert len(cpp_cuts) > 10
-        assert cpp_cuts == rs_cuts
-
-    @pytest.mark.skipif(
-        not os.environ.get("PARQUET_JAVA_CLASSPATH"),
-        reason="PARQUET_JAVA_CLASSPATH is not set",
+    @pytest.mark.parametrize(
+        "writer",
+        [
+            ParquetRs,
+            pytest.param(
+                ParquetJava,
+                marks=pytest.mark.skipif(
+                    not os.environ.get("PARQUET_JAVA_CLASSPATH"),
+                    reason="PARQUET_JAVA_CLASSPATH is not set",
+                ),
+            ),
+        ],
     )
-    def test_java_cdc_cuts_match_cpp(self, tmp_path, ints):
+    def test_cdc_cuts_match_across_implementations(self, tmp_path, ints, writer):
         cpp = without_page_limits(ParquetCpp, row_group_size=len(ints))
-        java = without_page_limits(ParquetJava, row_group_size=len(ints))
+        other = without_page_limits(writer, row_group_size=len(ints))
         cpp_cuts = Layout.read(cpp.write("cpp", ints, tmp_path)).cuts(0)
-        java_cuts = Layout.read(java.write("java", ints, tmp_path)).cuts(0)
+        other_cuts = Layout.read(other.write("other", ints, tmp_path)).cuts(0)
         assert len(cpp_cuts) > 10
-        assert java_cuts == cpp_cuts
+        assert other_cuts == cpp_cuts

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Executor, ThreadPoolExecutor, as_completed
 
 import pyarrow as pa
 from tqdm import tqdm
@@ -13,8 +13,6 @@ from .formats import FileFormat
 @dataclass
 class EstimationResult:
     format: FileFormat
-    # written files in input order, the first one is the original
-    paths: list[Path]
     numfiles: int
     total_len: int
     chunk_bytes: int
@@ -25,9 +23,10 @@ class EstimationResult:
     group: str = ""
 
 
-def estimate(paths):
+def estimate(paths, plot=True):
+    """Estimate the deduplication of the files, plot writes PNGs of their chunks."""
     string_paths = list(map(str, paths))
-    total_bytes, chunk_bytes, compressed_chunk_bytes = _estimate_de(string_paths)
+    total_bytes, chunk_bytes, compressed_chunk_bytes = _estimate_de(string_paths, plot)
     xet_bytes = _estimate_xet(string_paths)
     return {
         "numfiles": len(string_paths),
@@ -40,6 +39,35 @@ def estimate(paths):
     }
 
 
+def write_formats_tables(
+    formats: Sequence[FileFormat],
+    tables: dict[str, dict[str, Path | pa.Table]],
+    directory: Path,
+    executor: Executor,
+    sanity_check: bool = True,
+) -> dict[tuple[str, FileFormat], list[Path]]:
+    """Write every group's files with every format to directory/group/format name.
+
+    tables maps group name -> {name: Path | pa.Table}; the written paths are
+    returned per (group, format) in input order.
+    """
+    writes = {}
+    for table_name, table in tables.items():
+        for fmt in formats:
+            prefix = directory / table_name / fmt.name
+            prefix.mkdir(parents=True, exist_ok=True)
+            writes[(table_name, fmt)] = [
+                executor.submit(
+                    fmt.write, name, value, prefix, sanity_check=sanity_check
+                )
+                for name, value in table.items()
+            ]
+    pending = [future for futures in writes.values() for future in futures]
+    for _ in tqdm(as_completed(pending), total=len(pending)):
+        pass
+    return {key: [f.result() for f in futures] for key, futures in writes.items()}
+
+
 def compare_formats_tables(
     formats: Sequence[FileFormat],
     tables: dict[str, dict[str, Path | pa.Table]],
@@ -49,38 +77,18 @@ def compare_formats_tables(
 ) -> list[EstimationResult]:
     """For each format and group, write/rewrite files and estimate deduplication.
 
-    tables maps group name -> {name: Path | pa.Table}.
-    Path values: rewrite all files, estimate across the group (one record per
-    (format, group)). pa.Table values: compare first (original) against second
-    (edit), one record per (format, group).
+    tables maps group name -> {name: Path | pa.Table}. Every file of a group is
+    estimated together, one record per (format, group).
     """
-    directory = Path(directory)
-
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all file writes, grouped by (table_name, fmt) in input order
-        writes = {}
-        for table_name, table in tables.items():
-            for fmt in formats:
-                prefix = directory / table_name / fmt.name
-                prefix.mkdir(parents=True, exist_ok=True)
-                writes[(table_name, fmt)] = [
-                    executor.submit(
-                        fmt.write, name, value, prefix, sanity_check=sanity_check
-                    )
-                    for name, value in table.items()
-                ]
-        pending = [future for futures in writes.values() for future in futures]
-        for _ in tqdm(as_completed(pending), total=len(pending)):
-            pass
-        groups = {key: [f.result() for f in futures] for key, futures in writes.items()}
-
-        # Estimate in parallel for each group
+        groups = write_formats_tables(
+            formats, tables, Path(directory), executor, sanity_check
+        )
         estimates = executor.map(estimate, groups.values())
-
-    return [
-        EstimationResult(format=fmt, group=table_name, paths=paths, **data)
-        for ((table_name, fmt), paths), data in zip(groups.items(), estimates)
-    ]
+        return [
+            EstimationResult(format=fmt, group=table_name, **data)
+            for (table_name, fmt), data in zip(groups, estimates)
+        ]
 
 
 def compare_formats(
@@ -113,11 +121,6 @@ def compare_formats(
         estimates = executor.map(estimate, path_pairs)
 
     return [
-        EstimationResult(
-            format=contenders[name],
-            group="param-impact",
-            paths=[baseline_path, contender_paths[name]],
-            **data,
-        )
+        EstimationResult(format=contenders[name], group="param-impact", **data)
         for name, data in zip(names, estimates)
     ]

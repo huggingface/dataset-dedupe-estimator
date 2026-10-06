@@ -37,7 +37,7 @@ def sources(tmp_path_factory):
 @pytest.fixture(scope="module")
 def first_run(sources, tmp_path_factory):
     run_dir = tmp_path_factory.mktemp("run")
-    return run_dir, run(run_dir, sources, small_matrix(DEFAULTS))
+    return run_dir, run(run_dir, load_sources(sources), small_matrix(DEFAULTS))
 
 
 class TestSources:
@@ -129,7 +129,7 @@ class TestMatrix:
         profiles = matrix(
             [WRITERS["parquet-rs"]], NUM_ROWS, CDC, "snappy", [5000], [], ["nocdc"]
         )
-        results = run(tmp_path, sources, profiles, max_workers=2)
+        results = run(tmp_path, load_sources(sources), profiles, max_workers=2)
         assert {(c["profile"], c["edit"]) for c in results["cells"]} == {
             ("nocdc", "inserted"),
             ("nocdc", "deleted"),
@@ -158,7 +158,8 @@ class TestRun:
                 assert cell["edit"] in ("inserted", "deleted")
                 assert 0.5 <= cell["dedup"]["dedup_ratio"] <= 1
                 assert len(cell["files"]) == 2
-                assert cell["empty_pages"] >= 0
+                assert cell["dedup"]["empty_pages"] >= 0
+                assert 0 <= cell["dedup"]["new_bytes"] <= 1
 
     def test_arrow_rs_keeps_cdc_state(self, first_run):
         _, results = first_run
@@ -187,7 +188,7 @@ class TestCompareRuns:
     def test_runs_from_the_same_sources(self, sources, first_run, tmp_path):
         first, _ = first_run
         second = tmp_path / "second"
-        run(second, sources, small_matrix([WRITERS["parquet-cpp"]]))
+        run(second, load_sources(sources), small_matrix([WRITERS["parquet-cpp"]]))
         report = compare_runs([first, second])
         assert [r["label"] for r in report["runs"]] == [str(first), str(second)]
 
@@ -216,8 +217,8 @@ class TestCompareRuns:
     def test_different_sources_are_rejected(self, first_run, tmp_path):
         first, _ = first_run
         sources = tmp_path / "sources"
-        prepare_sources(sources, SCHEMA, 10_000, EDIT_POINTS, edit_size=10)
+        manifest = prepare_sources(sources, SCHEMA, 10_000, EDIT_POINTS, edit_size=10)
         other = tmp_path / "other"
-        run(other, sources, small_matrix([WRITERS["parquet-rs"]], num_rows=10_000))
+        run(other, manifest, small_matrix([WRITERS["parquet-rs"]], num_rows=10_000))
         with pytest.raises(ValueError, match="different source files"):
             compare_runs([first, other])

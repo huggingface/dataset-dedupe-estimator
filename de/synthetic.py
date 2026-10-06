@@ -2,6 +2,11 @@ import numpy as np
 import pyarrow as pa
 
 
+def evenly_spaced(count: int) -> list[float]:
+    """Relative positions of count evenly spaced edits."""
+    return np.linspace(0.5 / count, 1 - 0.5 / count, count).tolist()
+
+
 class DataGenerator:
     def __init__(self, schema, seed=42):
         self.schema = schema

@@ -167,10 +167,10 @@ and needs the classpath of parquet-hadoop, e.g. from a parquet-java checkout:
 Show the exact pages of a file, or compare the pages of two files:
 
 ```bash
-❯ de pages runs/stock/cut/original/parquet-cpp/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet
+❯ de pages runs/stock/cut/parquet-cpp/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet
 ❯ de page-diff \
-    runs/stock/cut/original/parquet-cpp/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet \
-    runs/stock/cut/original/parquet-rs/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet
+    runs/stock/cut/parquet-cpp/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet \
+    runs/stock/cut/parquet-rs/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet
 ```
 
 
