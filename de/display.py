@@ -1,3 +1,5 @@
+from dataclasses import asdict
+
 from humanize import naturalsize
 from rich.bar import Bar
 from rich.console import Console
@@ -150,82 +152,74 @@ def _table(*columns: str) -> Table:
 
 def print_pages(layout: Layout) -> None:
     """Display every page of a parquet file, data pages with their level range."""
-    table = _table(
-        "Row Group",
-        "<Column",
-        "<Type",
-        "<Encoding",
-        "First Level",
-        "Values",
-        "Header",
-        "Compressed",
-        "Uncompressed",
-        "<Page Hash",
+    rows = []
+    for column in layout.columns:
+        starts = (span.start for span in layout.spans(column))
+        for page in layout.column_pages(column):
+            is_data = page["page_type"] != "dictionary"
+            first_level = f"{next(starts):,}" if is_data else ""
+            rows.append(dict(page, first_level=first_level))
+    # file order: row group by row group, column by column
+    rows.sort(key=lambda row: (row["row_group"], row["column"]))
+    console = Console()
+    _print_rows(
+        console,
+        "Pages in file order, data pages with the level they start at",
+        rows,
+        ("row_group", "column"),
+        [
+            ("Row Group", lambda row: str(row["row_group"])),
+            ("<Column", lambda row: row["path"]),
+            ("<Type", lambda row: row["page_type"]),
+            ("<Encoding", lambda row: row["encoding"]),
+            ("First Level", lambda row: row["first_level"]),
+            ("Values", lambda row: f"{row['num_values']:,}"),
+            ("Header", lambda row: f"{row['header_bytes']:,}"),
+            ("Compressed", lambda row: f"{row['compressed_bytes']:,}"),
+            ("Uncompressed", lambda row: f"{row['uncompressed_bytes']:,}"),
+            ("<Page Hash", lambda row: f"{row['page_hash']:016x}"),
+        ],
     )
-    levels = {column: 0 for column in layout.columns}
-    previous = None
-    for page in layout.pages:
-        chunk = (page["row_group"], page["column"])
-        if chunk != previous:
-            table.add_section()
-            previous = chunk
-        is_data = page["page_type"] != "dictionary"
-        first = f"{levels[page['column']]:,}" if is_data else ""
-        if is_data:
-            levels[page["column"]] += page["num_values"]
-        table.add_row(
-            str(page["row_group"]),
-            page["path"],
-            page["page_type"],
-            page["encoding"],
-            first,
-            f"{page['num_values']:,}",
-            f"{page['header_bytes']:,}",
-            f"{page['compressed_bytes']:,}",
-            f"{page['uncompressed_bytes']:,}",
-            f"{page['page_hash']:016x}",
-        )
 
     summary = _table("<Column", "Levels", "Data Pages", "Cuts", "Row Groups", "Empty")
     for column in layout.columns:
         spans = layout.spans(column)
         summary.add_row(
-            next(p["path"] for p in layout.pages if p["column"] == column),
+            layout.column_pages(column)[0]["path"],
             f"{spans[-1].end:,}",
             f"{len(spans):,}",
             f"{len(layout.cuts(column)):,}",
             f"{len(layout.row_group_starts(column)) + 1:,}",
             f"{layout.empty_pages(column):,}",
         )
-    console = Console()
-    console.print(table)
     console.print(summary)
 
 
 def print_page_diffs(diffs: list[PageDiff]) -> None:
     """Display the page boundary agreement of two files per column."""
-    table = _table(
-        "<Column",
-        "Left Pages",
-        "Right Pages",
-        "Common Cuts",
-        "Left Only",
-        "Right Only",
-        "First Divergence",
-        "New Bytes",
+    _print_rows(
+        Console(),
+        "Page boundaries and page bytes of the right file compared to the left one",
+        [asdict(diff) for diff in diffs],
+        (),
+        [
+            ("<Column", lambda row: row["path"]),
+            ("Left Pages", lambda row: f"{row['left_pages']:,}"),
+            ("Right Pages", lambda row: f"{row['right_pages']:,}"),
+            ("Common Cuts", lambda row: f"{row['common_cuts']:,}"),
+            ("Left Only", lambda row: f"{row['left_only_cuts']:,}"),
+            ("Right Only", lambda row: f"{row['right_only_cuts']:,}"),
+            (
+                "First Divergence",
+                lambda row: (
+                    ""
+                    if row["first_divergence"] is None
+                    else f"{row['first_divergence']:,}"
+                ),
+            ),
+            ("New Bytes", lambda row: f"{row['new_bytes'] / row['right_bytes']:.1%}"),
+        ],
     )
-    for diff in diffs:
-        table.add_row(
-            diff.path,
-            f"{diff.left_pages:,}",
-            f"{diff.right_pages:,}",
-            f"{diff.common_cuts:,}",
-            f"{diff.left_only_cuts:,}",
-            f"{diff.right_only_cuts:,}",
-            "" if diff.first_divergence is None else f"{diff.first_divergence:,}",
-            f"{diff.new_bytes / diff.right_bytes:.1%}",
-        )
-    Console().print(table)
 
 
 def _print_rows(

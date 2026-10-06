@@ -3,7 +3,6 @@ from pathlib import Path
 import sys
 
 import click
-import numpy as np
 import pyarrow.parquet as pq
 
 from humanize import naturalsize
@@ -26,7 +25,7 @@ from .fileutils import checkout_file_revisions
 from .pages import Layout, compare
 from .formats import FileFormat, ParquetCpp, ParquetRs, JsonLines, Sqlite, CdcParams
 from .estimate import compare_formats_tables, compare_formats
-from .synthetic import DataGenerator
+from .synthetic import DataGenerator, evenly_spaced
 
 
 pio.renderers.default = "browser"  # Opens in a new browser tab
@@ -55,7 +54,11 @@ def cli(ctx, plot):
     "--size", "-s", default=1, help="Number of millions or records to generate"
 )
 @click.option(
-    "--num-edits", "-e", default=10, help="Number of changes to make in the data"
+    "--num-edits",
+    "-e",
+    default=10,
+    help="Number of changes to make in the data",
+    type=click.IntRange(min=1),
 )
 @click.option(
     "--edit-size", default=10, help="Number of rows to change in each edit", type=int
@@ -106,14 +109,13 @@ def synthetic(
     directory = Path(target_dir)
     directory.mkdir(exist_ok=True)
 
-    edit_points = np.linspace(0.5 / num_edits, 1 - 0.5 / num_edits, num_edits)
     schema = json.loads(schema)
 
     gen = DataGenerator(schema, seed=42)
     original, tables = gen.generate_synthetic_tables(
         size=size * 2**20,
         edit_size=edit_size,
-        edit_points=list(edit_points),
+        edit_points=evenly_spaced(num_edits),
         append_ratio=0.05,
         update_columns=list(schema.keys()),
     )
@@ -374,7 +376,10 @@ def param_impact(ctx, file, directory, row_group_size, data_page_size):
 @click.option("--schema", default='{"a": "int"}', help="Schema of the generated data")
 @click.option("--num-rows", default=16 * 2**20, help="Rows to generate", type=int)
 @click.option(
-    "--num-edits", default=10, help="Evenly spaced edits to make in the data", type=int
+    "--num-edits",
+    default=10,
+    help="Evenly spaced edits to make in the data",
+    type=click.IntRange(min=1),
 )
 @click.option(
     "--edit-point",
@@ -468,12 +473,12 @@ def bench(
     """
     if sources is None:
         sources = run_dir / "sources"
-        points = (
-            list(edit_points)
-            or np.linspace(0.5 / num_edits, 1 - 0.5 / num_edits, num_edits).tolist()
+        points = list(edit_points) or evenly_spaced(num_edits)
+        manifest = prepare_sources(
+            sources, json.loads(schema), num_rows, points, edit_size
         )
-        prepare_sources(sources, json.loads(schema), num_rows, points, edit_size)
-    manifest = load_sources(sources)
+    else:
+        manifest = load_sources(sources)
     cdc = CdcParams(
         min_chunk_size=cdc_min_size * 1024,
         max_chunk_size=cdc_max_size * 1024,
@@ -490,7 +495,7 @@ def bench(
     )
     run_bench(
         run_dir,
-        sources,
+        manifest,
         formats,
         sanity_check=not no_sanity_check,
         max_workers=max_workers,

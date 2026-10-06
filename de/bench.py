@@ -11,6 +11,7 @@ with different pyarrow builds) can be joined with `compare_runs`.
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
+from functools import cache, partial
 import hashlib
 import json
 from pathlib import Path
@@ -21,7 +22,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .estimate import compare_formats_tables
+from .estimate import estimate, write_formats_tables
 from .formats import CdcParams, Parquet, ParquetCpp, ParquetJava, ParquetRs, exact_size
 from .pages import Layout, PageDiff, compare, persistence
 from .synthetic import DataGenerator
@@ -42,7 +43,10 @@ NO_PAGE_LIMITS: dict[str, Any] = dict(data_page_size=2**30, max_rows_per_page=2*
 # a multiple of the 1024 values mini-batches arrow-rs checks its row limit after,
 # so both implementations cut at the same rows
 ALIGNED_PAGE_LIMITS: dict[str, Any] = dict(max_rows_per_page=20 * 1024)
-PROFILES = ("cut", "aligned", "default", "dict", "nocdc")
+# page cut profiles only rewrite the original, deduplication profiles the edits too
+CUT_PROFILES = ("cut", "aligned")
+DEDUP_PROFILES = ("default", "dict", "nocdc")
+PROFILES = CUT_PROFILES + DEDUP_PROFILES
 
 
 def _sha256(path: Path) -> str:
@@ -51,13 +55,16 @@ def _sha256(path: Path) -> str:
 
 
 def load_sources(directory: Path) -> dict:
-    """Load a sources manifest, verifying that the files didn't change."""
+    """Load a sources manifest, verifying that the files didn't change.
+
+    The manifest is returned together with the sources' directory.
+    """
     manifest = json.loads((directory / "manifest.json").read_text())
     for entry in manifest["files"].values():
         path = directory / entry["path"]
         if _sha256(path) != entry["sha256"]:
             raise ValueError(f"{path} doesn't match its manifest")
-    return manifest
+    return dict(manifest, directory=str(directory.resolve()))
 
 
 def prepare_sources(
@@ -113,7 +120,7 @@ def prepare_sources(
         files=files,
     )
     (directory / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    return manifest
+    return dict(manifest, directory=str(directory.resolve()))
 
 
 def matrix(
@@ -137,7 +144,7 @@ def matrix(
     Layouts are a single write call per row group size, plus streaming in each
     batch size with the largest row group size.
     """
-    if "cut" in profiles or "aligned" in profiles:
+    if set(profiles) & set(CUT_PROFILES):
         assert num_rows <= MAX_ROW_GROUP_SIZE, "the oracle needs a single row group"
     largest = max(row_group_sizes)
     plain: dict[str, Any] = dict(
@@ -194,77 +201,79 @@ def _cell(
 
 def run(
     run_dir: Path,
-    sources_dir: Path,
+    sources: dict,
     profiles: dict[str, list[Parquet]],
     sanity_check: bool = True,
     max_workers: Optional[int] = None,
 ) -> dict:
     """Write every profile's formats, measure them and save results.json.
 
-    max_workers bounds the files written and estimated concurrently, every single
-    write call holds a whole source table in memory.
+    sources is a manifest from `load_sources` or `prepare_sources`. max_workers
+    bounds the files written, read and estimated concurrently, every single write
+    call holds a whole source table in memory.
     """
-    manifest = load_sources(sources_dir)
-    sources = {name: sources_dir / f["path"] for name, f in manifest["files"].items()}
-    num_rows = manifest["num_rows"]
+    directory = Path(sources["directory"])
+    files = {name: directory / f["path"] for name, f in sources["files"].items()}
+    num_rows = sources["num_rows"]
     cells = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for profile, formats in profiles.items():
+            names = ["original"] if profile in CUT_PROFILES else ["original", *EDITS]
+            written = write_formats_tables(
+                formats,
+                {profile: {name: files[name] for name in names}},
+                run_dir,
+                executor,
+                sanity_check,
+            )
+            paths = {fmt: written[(profile, fmt)] for fmt in formats}
 
-    # page cut profiles only rewrite the original
-    for profile in ("cut", "aligned"):
-        formats = profiles.get(profile, [])
-        directories = [run_dir / profile / "original" / fmt.name for fmt in formats]
-        for directory in directories:
-            directory.mkdir(parents=True, exist_ok=True)
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = [
-                executor.submit(
-                    fmt.write, "original", sources["original"], directory, sanity_check
+            if profile == "aligned":
+                cells += [
+                    _cell(profile, fmt, "original", paths[fmt], run_dir)
+                    for fmt in formats
+                ]
+            elif profile == "cut":
+                originals = (paths[fmt][0] for fmt in formats)
+                layouts = dict(zip(formats, executor.map(Layout.read, originals)))
+                oracles = {
+                    fmt.name: layouts[fmt]
+                    for fmt in formats
+                    if fmt.row_group_size == num_rows and fmt.batch_size is None
+                }
+                for fmt in formats:
+                    cell = _cell(profile, fmt, "original", paths[fmt], run_dir)
+                    persisted = persistence(layouts[fmt], oracles[fmt.name])
+                    cell["persistence"] = [asdict(result) for result in persisted]
+                    cells.append(cell)
+            else:
+                written_files = [path for fmt in formats for path in paths[fmt]]
+                file_layouts = dict(
+                    zip(written_files, executor.map(Layout.read, written_files))
                 )
-                for fmt, directory in zip(formats, directories)
-            ]
-            layouts = {fmt: Layout.read(f.result()) for fmt, f in zip(formats, futures)}
-        oracles = {
-            fmt.name: layout
-            for fmt, layout in layouts.items()
-            if fmt.row_group_size == num_rows and fmt.batch_size is None
-        }
-        for fmt, future in zip(formats, futures):
-            cell = _cell(profile, fmt, "original", [future.result()], run_dir)
-            if profile == "cut":
-                persisted = persistence(layouts[fmt], oracles[fmt.name])
-                cell["persistence"] = [asdict(result) for result in persisted]
-            cells.append(cell)
-
-    # deduplication profiles rewrite the original and each edited version
-    groups: dict[str, dict[str, Path | pa.Table]] = {
-        edit: {"original": sources["original"], edit: sources[edit]} for edit in EDITS
-    }
-    for profile in ("default", "dict", "nocdc"):
-        estimates = compare_formats_tables(
-            profiles.get(profile, []),
-            groups,
-            run_dir / profile,
-            max_workers=max_workers,
-            sanity_check=sanity_check,
-        )
-        for result in estimates:
-            assert isinstance(result.format, Parquet)
-            original, edited = result.paths
-            cell = _cell(profile, result.format, result.group, result.paths, run_dir)
-            cell["dedup"] = dict(
-                total_len=result.total_len,
-                chunk_bytes=result.chunk_bytes,
-                dedup_ratio=result.dedup_ratio,
-                xet_bytes=result.xet_bytes,
-                xet_dedup_ratio=result.xet_dedup_ratio,
-            )
-            edited_layout = Layout.read(edited)
-            diffs = compare(Layout.read(original), edited_layout)
-            cell["pages"] = [asdict(diff) for diff in diffs]
-            cell["empty_pages"] = sum(
-                edited_layout.empty_pages(column) for column in edited_layout.columns
-            )
-            cells.append(cell)
+                pairs = [
+                    (fmt, edit, paths[fmt][0], path)
+                    for fmt in formats
+                    for edit, path in zip(EDITS, paths[fmt][1:])
+                ]
+                estimates = executor.map(
+                    partial(estimate, plot=False),
+                    ([original, edited] for _, _, original, edited in pairs),
+                )
+                for (fmt, edit, original, edited), result in zip(pairs, estimates):
+                    edited_layout = file_layouts[edited]
+                    diffs = compare(file_layouts[original], edited_layout)
+                    cell = _cell(profile, fmt, edit, [original, edited], run_dir)
+                    cell["dedup"] = dict(
+                        result,
+                        new_bytes=sum(diff.new_bytes for diff in diffs)
+                        / sum(diff.right_bytes for diff in diffs),
+                        empty_pages=sum(
+                            edited_layout.empty_pages(column)
+                            for column in edited_layout.columns
+                        ),
+                    )
+                    cells.append(cell)
 
     created_by: dict[str, str] = {}
     for cell in cells:
@@ -281,15 +290,11 @@ def run(
             arrow_git_description=pa.cpp_build_info.git_description,
             created_by=created_by,
         ),
-        sources=dict(manifest, directory=str(sources_dir.resolve())),
+        sources=sources,
         cells=cells,
     )
     (run_dir / "results.json").write_text(json.dumps(results_json, indent=2))
     return results_json
-
-
-def load_run(run_dir: Path) -> dict:
-    return json.loads((run_dir / "results.json").read_text())
 
 
 def _versus(diffs: list[PageDiff]) -> str:
@@ -308,7 +313,7 @@ def compare_runs(run_dirs: list[Path]) -> dict:
     Rows of a section share the profile, edit and layout; within a section rows
     are ordered by writer, then by run.
     """
-    runs = [load_run(run_dir) for run_dir in run_dirs]
+    runs = [json.loads((run_dir / "results.json").read_text()) for run_dir in run_dirs]
     digests = [
         {name: f["sha256"] for name, f in run["sources"]["files"].items()}
         for run in runs
@@ -316,6 +321,10 @@ def compare_runs(run_dirs: list[Path]) -> dict:
     if any(digest != digests[0] for digest in digests):
         raise ValueError("the runs were made from different source files")
     labels = [str(run_dir) for run_dir in run_dirs]
+    read = cache(Layout.read)
+
+    def layout(index: int, cell: dict) -> Layout:
+        return read(run_dirs[index] / cell["files"][0])
 
     # only cells with the same parameters are compared between runs
     sections: dict[tuple, dict[tuple, dict[int, dict]]] = {}
@@ -327,68 +336,63 @@ def compare_runs(run_dirs: list[Path]) -> dict:
             section.setdefault((cell["writer"], cell["params"]), {})[index] = cell
 
     persistence_rows, dedup_rows = [], []
-    for (profile, edit, layout), by_writer in sections.items():
+    for (profile, edit, layout_name), by_writer in sections.items():
         for (writer, _), by_run in by_writer.items():
-            first = None
-            for index, cell in sorted(by_run.items()):
+            ordered = sorted(by_run.items())
+            first, first_cell = ordered[0]
+            for index, cell in ordered:
                 row = dict(
                     profile=profile,
                     edit=edit,
-                    layout=layout,
+                    layout=layout_name,
                     writer=writer,
                     run=labels[index],
                 )
                 if "persistence" in cell:
-                    current = Layout.read(run_dirs[index] / cell["files"][-1])
-                    versus = _versus(compare(first, current)) if first else ""
-                    first = first or current
+                    versus = ""
+                    if index != first:
+                        diffs = compare(layout(first, first_cell), layout(index, cell))
+                        versus = _versus(diffs)
                     for result in cell["persistence"]:
                         persistence_rows.append(dict(row, **result, versus=versus))
                 if "dedup" in cell:
-                    pages = cell["pages"]
-                    new_bytes = sum(diff["new_bytes"] for diff in pages) / sum(
-                        diff["right_bytes"] for diff in pages
-                    )
-                    dedup_rows.append(
-                        dict(
-                            row,
-                            **cell["dedup"],
-                            new_bytes=new_bytes,
-                            empty_pages=cell["empty_pages"],
-                        )
-                    )
+                    dedup_rows.append(dict(row, **cell["dedup"]))
 
     # the same data written by different implementations with a single write call:
-    # each run's first writer is compared to the other writers of the same run, or
-    # of the last run having them, e.g. a run with a pyarrow build of another
-    # branch to the arrow-rs files of a previous run
+    # every writer is compared to the reference, the first of WRITERS, taking each
+    # side from the run itself or else from the last run having it, e.g. a pyarrow
+    # build of another branch to the arrow-rs files of a previous run
     cross_impl_rows = []
-    for (profile, edit, layout), by_writer in sections.items():
-        if profile not in ("cut", "aligned"):
+    for (profile, edit, layout_name), by_writer in sections.items():
+        if profile not in CUT_PROFILES:
             continue
         by_params: dict[str, dict[str, dict[int, dict]]] = defaultdict(dict)
         for (writer, params), by_run in by_writer.items():
             if next(iter(by_run.values()))["format"]["batch_size"] is None:
                 by_params[params][writer] = by_run
         for writers in by_params.values():
-            (left, left_runs), *others = writers.items()
-            for index, left_cell in sorted(left_runs.items()):
-                left_layout = Layout.read(run_dirs[index] / left_cell["files"][0])
-                for right, right_runs in others:
-                    right_index = index if index in right_runs else max(right_runs)
-                    right_cell = right_runs[right_index]
-                    right_layout = Layout.read(
-                        run_dirs[right_index] / right_cell["files"][0]
-                    )
-                    diffs = compare(left_layout, right_layout)
-                    pair = f"{left} vs {right}"
-                    if right_index != index:
-                        pair += f" of {labels[right_index]}"
+            reference, *others = sorted(writers, key=list(WRITERS).index)
+            for index in range(len(runs)):
+                for other in others:
+                    sides = [
+                        (
+                            writer,
+                            index if index in writers[writer] else max(writers[writer]),
+                        )
+                        for writer in (reference, other)
+                    ]
+                    if all(side != index for _, side in sides):
+                        continue
+                    left, right = (layout(side, writers[w][side]) for w, side in sides)
+                    diffs = compare(left, right)
                     cross_impl_rows.append(
                         dict(
                             profile=profile,
-                            layout=layout,
-                            pair=pair,
+                            layout=layout_name,
+                            pair=" vs ".join(
+                                w if side == index else f"{w} of {labels[side]}"
+                                for w, side in sides
+                            ),
                             run=labels[index],
                             common=sum(diff.common_cuts for diff in diffs),
                             left_only=sum(diff.left_only_cuts for diff in diffs),

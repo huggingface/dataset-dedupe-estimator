@@ -5,8 +5,9 @@ leaf column across the whole file. For flat columns a level is a row, for nested
 columns levels are the coordinate shared by every writer (pages may split records).
 """
 
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from functools import cached_property
 from pathlib import Path
 from typing import Optional
 
@@ -32,19 +33,37 @@ class Layout:
     def read(cls, path: str | Path) -> "Layout":
         return cls(parquet_pages(str(path)))
 
+    @cached_property
+    def _column_pages(self) -> dict[int, list[dict]]:
+        pages: dict[int, list[dict]] = {}
+        for page in self.pages:
+            pages.setdefault(page["column"], []).append(page)
+        return dict(sorted(pages.items()))
+
+    @cached_property
+    def _spans(self) -> dict[int, list[Span]]:
+        spans: dict[int, list[Span]] = {}
+        for column, pages in self._column_pages.items():
+            start = 0
+            spans[column] = []
+            for page in pages:
+                if page["page_type"] != "dictionary":
+                    end = start + page["num_values"]
+                    spans[column].append(Span(start, end, page["row_group"]))
+                    start = end
+        return spans
+
     @property
     def columns(self) -> list[int]:
-        return sorted({page["column"] for page in self.pages})
+        return list(self._column_pages)
+
+    def column_pages(self, column: int) -> list[dict]:
+        """The column's dictionary and data pages in file order, none if it's missing."""
+        return self._column_pages.get(column, [])
 
     def spans(self, column: int) -> list[Span]:
         """Level ranges of the column's data pages, empty pages included."""
-        spans, start = [], 0
-        for page in self.pages:
-            if page["column"] == column and page["page_type"] != "dictionary":
-                end = start + page["num_values"]
-                spans.append(Span(start, end, page["row_group"]))
-                start = end
-        return spans
+        return self._spans.get(column, [])
 
     def cuts(self, column: int) -> list[int]:
         """Level offsets where non-empty data pages start, excluding 0."""
@@ -89,8 +108,8 @@ def compare(left: Layout, right: Layout) -> list[PageDiff]:
     for column in right.columns:
         left_cuts, right_cuts = set(left.cuts(column)), set(right.cuts(column))
         different = left_cuts ^ right_cuts
-        left_hashes = {p["page_hash"] for p in left.pages if p["column"] == column}
-        right_pages = [p for p in right.pages if p["column"] == column]
+        left_hashes = {p["page_hash"] for p in left.column_pages(column)}
+        right_pages = right.column_pages(column)
         sizes = [p["header_bytes"] + p["compressed_bytes"] for p in right_pages]
         new = sum(
             size
@@ -155,10 +174,12 @@ def persistence(layout: Layout, oracle: Layout) -> list[Persistence]:
             return anchors[i] == span.start and anchors[i + 1] == span.end
 
         aligned = [s for s in spans if s.end > s.start and is_aligned(s)]
+        aligned_starts = [s.start for s in aligned]
         resyncs = []
         for g, end in zip(row_group_starts, row_group_starts[1:] + [num_levels]):
-            first = next((s.start for s in aligned if g <= s.start < end), end)
-            resyncs.append(first - g)
+            i = bisect_left(aligned_starts, g)
+            first = aligned_starts[i] if i < len(aligned) else end
+            resyncs.append(min(first, end) - g)
 
         results.append(
             Persistence(

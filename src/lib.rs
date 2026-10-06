@@ -13,22 +13,32 @@ use pages::{read_pages, Page};
 use show::write_png;
 use store::{Chunk, ChunkStore};
 
-/// Formats the sum of two numbers as string.
+/// Estimate the deduplication of the files with content defined chunks.
+///
+/// With `plot`, also writes the chunks of each file next to it as `<file>.png`, and
+/// of all files as `merged.png` next to the last one.
 #[pyfunction]
-fn estimate(py: Python<'_>, file_paths: Vec<String>) -> PyResult<(usize, usize, usize)> {
+#[pyo3(signature = (file_paths, plot = true))]
+fn estimate(
+    py: Python<'_>,
+    file_paths: Vec<String>,
+    plot: bool,
+) -> PyResult<(usize, usize, usize)> {
     py.allow_threads(|| {
         let mut stores = ChunkStore::from_files(&file_paths, false)?;
         let merged = ChunkStore::merge(&mut stores, false);
 
-        for (store, file_path) in stores.iter().zip(file_paths.iter()) {
-            let segments = store.segments();
-            let output_file_path = format!("{}.png", file_path);
-            write_png(&segments, &output_file_path)?;
-        }
+        if plot {
+            for (store, file_path) in stores.iter().zip(file_paths.iter()) {
+                let segments = store.segments();
+                let output_file_path = format!("{}.png", file_path);
+                write_png(&segments, &output_file_path)?;
+            }
 
-        let file_dir = Path::new(file_paths.last().unwrap()).parent().unwrap();
-        let output_file_path = file_dir.join("merged.png");
-        write_png(&merged.segments(), output_file_path.to_str().unwrap())?;
+            let file_dir = Path::new(file_paths.last().unwrap()).parent().unwrap();
+            let output_file_path = file_dir.join("merged.png");
+            write_png(&merged.segments(), output_file_path.to_str().unwrap())?;
+        }
 
         Ok(merged.stats())
     })

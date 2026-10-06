@@ -178,6 +178,10 @@ class TestParquet:
         }
         assert len(paths) == 3
 
+    def test_streaming_needs_a_streaming_writer(self):
+        with pytest.raises(ValueError, match="no write calls"):
+            ParquetJava(use_cdc=False, batch_size=10)
+
     def test_every_field_changes_paramstem(self):
         changed = {
             "use_cdc": True,
@@ -261,10 +265,6 @@ class TestParquetJava:
             "out", data, tmp_path
         )
         assert pq.read_table(path).equals(data)
-
-    def test_streaming_is_not_supported(self, tmp_path, table):
-        with pytest.raises(ValueError, match="no write calls"):
-            ParquetJava(use_cdc=False, batch_size=10).write("out", table, tmp_path)
 
 
 class TestJsonLines:
