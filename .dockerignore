@@ -1,0 +1,8 @@
+.venv
+target
+notebooks/iterate-cheaply_files
+notebooks/*.md
+notebooks/*.html
+notebooks/*.ipynb
+__pycache__
+*.pyc

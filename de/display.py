@@ -1,9 +1,13 @@
+from dataclasses import asdict
+
 from humanize import naturalsize
 from rich.bar import Bar
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 import plotly.graph_objects as go
+
+from .pages import Layout, PageDiff
 
 
 def _bar_color(r, numfiles):
@@ -135,3 +139,174 @@ def plot_bars(results: list, output_html: str | None = None) -> None:
     if output_html:
         fig.write_html(output_html, include_plotlyjs="cdn")
     fig.show()
+
+
+def _table(*columns: str) -> Table:
+    """A table with right justified columns, except those prefixed with '<'."""
+    table = Table(show_header=True, header_style="bold magenta")
+    for column in columns:
+        left = column.startswith("<")
+        table.add_column(column.lstrip("<"), justify="left" if left else "right")
+    return table
+
+
+def print_pages(layout: Layout) -> None:
+    """Display every page of a parquet file, data pages with their level range."""
+    rows = []
+    for column in layout.columns:
+        starts = (span.start for span in layout.spans(column))
+        for page in layout.column_pages(column):
+            is_data = page["page_type"] != "dictionary"
+            first_level = f"{next(starts):,}" if is_data else ""
+            rows.append(dict(page, first_level=first_level))
+    # file order: row group by row group, column by column
+    rows.sort(key=lambda row: (row["row_group"], row["column"]))
+    console = Console()
+    _print_rows(
+        console,
+        "Pages in file order, data pages with the level they start at",
+        rows,
+        ("row_group", "column"),
+        [
+            ("Row Group", lambda row: str(row["row_group"])),
+            ("<Column", lambda row: row["path"]),
+            ("<Type", lambda row: row["page_type"]),
+            ("<Encoding", lambda row: row["encoding"]),
+            ("First Level", lambda row: row["first_level"]),
+            ("Values", lambda row: f"{row['num_values']:,}"),
+            ("Header", lambda row: f"{row['header_bytes']:,}"),
+            ("Compressed", lambda row: f"{row['compressed_bytes']:,}"),
+            ("Uncompressed", lambda row: f"{row['uncompressed_bytes']:,}"),
+            ("<Page Hash", lambda row: f"{row['page_hash']:016x}"),
+        ],
+    )
+
+    summary = _table("<Column", "Levels", "Data Pages", "Cuts", "Row Groups", "Empty")
+    for column in layout.columns:
+        spans = layout.spans(column)
+        summary.add_row(
+            layout.column_pages(column)[0]["path"],
+            f"{spans[-1].end:,}",
+            f"{len(spans):,}",
+            f"{len(layout.cuts(column)):,}",
+            f"{len(layout.row_group_starts(column)) + 1:,}",
+            f"{layout.empty_pages(column):,}",
+        )
+    console.print(summary)
+
+
+def print_page_diffs(diffs: list[PageDiff]) -> None:
+    """Display the page boundary agreement of two files per column."""
+    _print_rows(
+        Console(),
+        "Page boundaries and page bytes of the right file compared to the left one",
+        [asdict(diff) for diff in diffs],
+        (),
+        [
+            ("<Column", lambda row: row["path"]),
+            ("Left Pages", lambda row: f"{row['left_pages']:,}"),
+            ("Right Pages", lambda row: f"{row['right_pages']:,}"),
+            ("Common Cuts", lambda row: f"{row['common_cuts']:,}"),
+            ("Left Only", lambda row: f"{row['left_only_cuts']:,}"),
+            ("Right Only", lambda row: f"{row['right_only_cuts']:,}"),
+            (
+                "First Divergence",
+                lambda row: (
+                    ""
+                    if row["first_divergence"] is None
+                    else f"{row['first_divergence']:,}"
+                ),
+            ),
+            ("New Bytes", lambda row: f"{row['new_bytes'] / row['right_bytes']:.1%}"),
+        ],
+    )
+
+
+def _print_rows(
+    console: Console, title: str, rows: list[dict], section: tuple, columns: list
+) -> None:
+    """Print rows as a table of (header, cell) columns, one section per section key."""
+    table = _table(*(header for header, _ in columns))
+    previous = None
+    for row in rows:
+        key = tuple(row[name] for name in section)
+        if key != previous:
+            table.add_section()
+            previous = key
+        table.add_row(*(cell(row) for _, cell in columns))
+    console.print(title)
+    console.print(table)
+
+
+def print_report(report: dict) -> None:
+    """Display the page cut, deduplication and cross implementation results of runs."""
+    console = Console()
+    runs = _table("<Run", "<pyarrow", "<Arrow Git Id", "<Written By")
+    for run in report["runs"]:
+        runs.add_row(
+            run["label"],
+            run["pyarrow"],
+            run["arrow_git_id"][:12],
+            "\n".join(run["created_by"].values()),
+        )
+    console.print(runs)
+
+    # the run columns are only interesting when comparing runs
+    multiple = len(report["runs"]) > 1
+    run = [("<Run", lambda row: row["run"])] if multiple else []
+    versus = [("<vs First Run", lambda row: row["versus"])] if multiple else []
+
+    _print_rows(
+        console,
+        "Page cuts against each writer's single row group oracle (PLAIN, no page "
+        "limits), ideally recall 100%, extra 0, aligned 100%, resync 0",
+        report["persistence"],
+        ("layout",),
+        [
+            ("<Layout", lambda row: row["layout"]),
+            ("<Writer", lambda row: row["writer"]),
+            *run,
+            ("Col", lambda row: str(row["column"])),
+            ("Recall", lambda row: f"{row['recall']:.1%}"),
+            ("Extra", lambda row: f"{row['extra']:,}"),
+            ("Aligned", lambda row: f"{row['aligned']:.1%}"),
+            ("Resync", lambda row: f"{row['resync']:,.0f}"),
+            ("Empty", lambda row: f"{row['empty']:,}"),
+            *versus,
+        ],
+    )
+    _print_rows(
+        console,
+        "Deduplication of the original with its edited version (lower is better, "
+        "50% is ideal), new bytes are the edited file's page bytes not in the "
+        "original, empty pages are the edited file's data pages without values",
+        report["dedup"],
+        ("profile", "edit", "layout"),
+        [
+            ("<Profile", lambda row: row["profile"]),
+            ("<Edit", lambda row: row["edit"]),
+            ("<Layout", lambda row: row["layout"]),
+            ("<Writer", lambda row: row["writer"]),
+            *run,
+            ("Total Size", lambda row: naturalsize(row["total_len"], binary=True)),
+            ("Dedup Ratio", lambda row: f"{row['dedup_ratio']:.1%}"),
+            ("Xet Dedup Ratio", lambda row: f"{row['xet_dedup_ratio']:.1%}"),
+            ("New Bytes", lambda row: f"{row['new_bytes']:.1%}"),
+            ("Empty Pages", lambda row: f"{row['empty_pages']:,}"),
+        ],
+    )
+    _print_rows(
+        console,
+        "Page cuts of the same data written by different implementations",
+        report["cross_impl"],
+        ("profile", "layout"),
+        [
+            ("<Profile", lambda row: row["profile"]),
+            ("<Layout", lambda row: row["layout"]),
+            ("<Pair", lambda row: row["pair"]),
+            *run,
+            ("Common", lambda row: f"{row['common']:,}"),
+            ("Left Only", lambda row: f"{row['left_only']:,}"),
+            ("Right Only", lambda row: f"{row['right_only']:,}"),
+        ],
+    )
