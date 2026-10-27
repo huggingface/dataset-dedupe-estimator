@@ -2,6 +2,11 @@ import numpy as np
 import pyarrow as pa
 
 
+def evenly_spaced(count: int) -> list[float]:
+    """Relative positions of count evenly spaced edits."""
+    return np.linspace(0.5 / count, 1 - 0.5 / count, count).tolist()
+
+
 class DataGenerator:
     def __init__(self, schema, seed=42):
         self.schema = schema
@@ -107,6 +112,15 @@ def _random_strings(rng, n, min_len, max_len):
 def generate_array(rng, dtype, num_samples):
     if dtype in ("int", int):
         return pa.array(rng.integers(0, 1_000_000, size=num_samples))
+    elif dtype in ("int64",):
+        # the full value range, every byte is random so it doesn't compress
+        info = np.iinfo(np.int64)
+        return pa.array(
+            rng.integers(info.min, info.max, size=num_samples, endpoint=True)
+        )
+    elif dtype in ("zeros",):
+        # constant, so content defined chunking can only cut at the max chunk size
+        return pa.array(np.zeros(num_samples, dtype=np.int64))
     elif dtype in ("float", float):
         return pa.array(rng.uniform(0, 1_000_000, size=num_samples).round(3))
     elif dtype in ("str", str):

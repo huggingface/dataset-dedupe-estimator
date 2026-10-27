@@ -1,12 +1,24 @@
+from dataclasses import fields, replace
 import gzip
 import json
+import os
 import sqlite3
+import tempfile
 
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from de.formats import JsonLines, ParquetCpp, Sqlite
+from de.formats import (
+    CdcParams,
+    JsonLines,
+    Parquet,
+    ParquetCpp,
+    ParquetJava,
+    ParquetRs,
+    Sqlite,
+)
+from de.synthetic import DataGenerator
 
 
 @pytest.fixture
@@ -97,6 +109,162 @@ class TestParquetCpp:
         pq.write_table(big_table, src)
         dest = ParquetCpp(use_cdc=False, row_group_size=20).write("dst", src, tmp_path)
         assert pq.read_metadata(dest).num_row_groups == 5
+
+
+class TestParquetRs:
+    def test_paramstem_with_row_group_size(self):
+        fmt = ParquetRs(use_cdc=True, compression="zstd", row_group_size=2**16)
+        assert fmt.paramstem == "zstd cdc rg=64Ki"
+
+    def test_write_with_row_group_size(self, tmp_path):
+        big_table = pa.table({"x": list(range(100))})
+        path = ParquetRs(use_cdc=False, row_group_size=10).write(
+            "out", big_table, tmp_path
+        )
+        assert pq.read_metadata(path).num_row_groups == 10
+        assert pq.read_table(path).equals(big_table)
+
+    def test_write_without_dictionary(self, tmp_path, table):
+        path = ParquetRs(use_cdc=False, use_dictionary=False).write(
+            "out", table, tmp_path
+        )
+        column = pq.read_metadata(path).row_group(0).column(0)
+        assert not column.has_dictionary_page
+        assert pq.read_table(path).equals(table)
+
+    def test_table_source_leaves_no_temp_files(self, tmp_path, table, monkeypatch):
+        tmp = tmp_path / "tmp"
+        tmp.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp))
+        ParquetRs(use_cdc=True).write("out", table, tmp_path)
+        assert list(tmp.iterdir()) == []
+
+
+CDC = CdcParams(min_chunk_size=8 * 1024, max_chunk_size=32 * 1024, norm_level=0)
+
+
+def row_group_sizes(path):
+    metadata = pq.read_metadata(path)
+    return [metadata.row_group(i).num_rows for i in range(metadata.num_row_groups)]
+
+
+class TestParquet:
+    def test_paramstem_all_fields(self):
+        fmt = ParquetCpp(
+            use_cdc=CDC,
+            compression="snappy",
+            use_dictionary=False,
+            row_group_size=2**16,
+            data_page_size=2**30,
+            max_rows_per_page=20480,
+            batch_size=100_000,
+        )
+        assert fmt.paramstem == (
+            "snappy cdc=8Ki-32Ki-n0 nodict rg=64Ki dp=1Gi rpp=20Ki stream=100000"
+        )
+
+    def test_paramstem_sizes_are_exact(self):
+        assert ParquetRs(use_cdc=False, row_group_size=300_000).paramstem == (
+            "rg=300000"
+        )
+        assert ParquetRs(use_cdc=False, row_group_size=299_999).paramstem == (
+            "rg=299999"
+        )
+
+    def test_paramstem_norm_levels_differ(self, tmp_path):
+        paths = {
+            ParquetRs(use_cdc=replace(CDC, norm_level=level)).derive_path("x", tmp_path)
+            for level in (-1, 0, 1)
+        }
+        assert len(paths) == 3
+
+    def test_streaming_needs_a_streaming_writer(self):
+        with pytest.raises(ValueError, match="no write calls"):
+            ParquetJava(use_cdc=False, batch_size=10)
+
+    def test_every_field_changes_paramstem(self):
+        changed = {
+            "use_cdc": True,
+            "compression": "snappy",
+            "use_dictionary": False,
+            "row_group_size": 10,
+            "data_page_size": 1024,
+            "max_rows_per_page": 10,
+            "batch_size": 10,
+        }
+        assert {f.name for f in fields(Parquet)} == changed.keys()
+        base = ParquetCpp(use_cdc=False)
+        for name, value in changed.items():
+            assert replace(base, **{name: value}).paramstem != base.paramstem, name
+
+    @pytest.mark.parametrize(
+        ("writer", "batch_size", "expected"),
+        [
+            (ParquetCpp, None, [30, 30, 30, 10]),
+            (ParquetCpp, 25, [25, 25, 25, 25]),
+            (ParquetRs, None, [30, 30, 30, 10]),
+            (ParquetRs, 25, [30, 30, 30, 10]),
+        ],
+    )
+    def test_row_groups_per_mode(self, tmp_path, writer, batch_size, expected):
+        big_table = pa.table({"x": list(range(100))})
+        fmt = writer(use_cdc=False, row_group_size=30, batch_size=batch_size)
+        path = fmt.write("out", big_table, tmp_path)
+        assert row_group_sizes(path) == expected
+
+    @pytest.mark.parametrize("writer", [ParquetCpp, ParquetRs])
+    @pytest.mark.parametrize("batch_size", [None, 64])
+    def test_table_and_path_sources_are_identical(self, tmp_path, writer, batch_size):
+        data = DataGenerator({"a": "int", "b": "str"}).generate_table(500)
+        src = tmp_path / "src.parquet"
+        pq.write_table(data, src, row_group_size=7)
+        fmt = writer(use_cdc=CDC, compression="snappy", batch_size=batch_size)
+        from_table = fmt.write("table", data, tmp_path)
+        from_path = fmt.write("path", src, tmp_path)
+        assert from_table.read_bytes() == from_path.read_bytes()
+
+    @pytest.mark.parametrize("writer", [ParquetCpp, ParquetRs])
+    @pytest.mark.parametrize("batch_size", [None, 100])
+    def test_nested_schema_round_trips(self, tmp_path, writer, batch_size):
+        schema = {"a": "int", "b": "str", "c": ["int"], "d": {"x": "float"}}
+        data = DataGenerator(schema).generate_table(1000)
+        fmt = writer(use_cdc=CDC, use_dictionary=False, batch_size=batch_size)
+        path = fmt.write("out", data, tmp_path)
+        assert pq.read_table(path).equals(data)
+
+
+needs_java = pytest.mark.skipif(
+    not os.environ.get("PARQUET_JAVA_CLASSPATH"),
+    reason="PARQUET_JAVA_CLASSPATH is not set",
+)
+
+
+@needs_java
+class TestParquetJava:
+    def test_row_groups(self, tmp_path):
+        big_table = pa.table({"x": list(range(100))})
+        path = ParquetJava(use_cdc=False, row_group_size=30).write(
+            "out", big_table, tmp_path
+        )
+        assert row_group_sizes(path) == [30, 30, 30, 10]
+        assert pq.read_metadata(path).created_by.startswith("parquet-mr")
+
+    def test_table_and_path_sources_are_identical(self, tmp_path):
+        data = DataGenerator({"a": "int", "b": "str"}).generate_table(500)
+        src = tmp_path / "src.parquet"
+        pq.write_table(data, src, row_group_size=7)
+        fmt = ParquetJava(use_cdc=CDC, compression="snappy", row_group_size=100)
+        from_table = fmt.write("table", data, tmp_path)
+        from_path = fmt.write("path", src, tmp_path)
+        assert from_table.read_bytes() == from_path.read_bytes()
+
+    def test_nested_schema_round_trips(self, tmp_path):
+        schema = {"a": "int", "b": "str", "c": ["int"], "d": {"x": "float"}}
+        data = DataGenerator(schema).generate_table(1000)
+        path = ParquetJava(use_cdc=CDC, use_dictionary=False).write(
+            "out", data, tmp_path
+        )
+        assert pq.read_table(path).equals(data)
 
 
 class TestJsonLines:
