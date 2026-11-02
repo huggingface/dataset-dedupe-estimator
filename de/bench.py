@@ -23,7 +23,16 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .estimate import estimate, write_formats_tables
-from .formats import CdcParams, Parquet, ParquetCpp, ParquetJava, ParquetRs, exact_size
+from .formats import (
+    NO_LIMIT,
+    CdcParams,
+    Parquet,
+    ParquetCpp,
+    ParquetDuckDB,
+    ParquetJava,
+    ParquetRs,
+    exact_size,
+)
 from .pages import Layout, PageDiff, compare, persistence
 from .synthetic import DataGenerator
 
@@ -31,15 +40,18 @@ WRITERS: dict[str, type[Parquet]] = {
     "parquet-cpp": ParquetCpp,
     "parquet-rs": ParquetRs,
     "parquet-java": ParquetJava,
+    "duckdb": ParquetDuckDB,
 }
-# parquet-java needs PARQUET_JAVA_CLASSPATH, so it is opt-in
+# parquet-java needs PARQUET_JAVA_CLASSPATH and duckdb DUCKDB_BINARY, so they are opt-in
 DEFAULT_WRITERS = ("parquet-cpp", "parquet-rs")
 EDITS = ("inserted", "deleted")
 SEED = 42
 # pyarrow caps row groups at 64Mi rows, the oracle must fit into a single one
 MAX_ROW_GROUP_SIZE = 64 * 2**20
 # large enough to never cut: pages end at CDC chunk and row group boundaries only
-NO_PAGE_LIMITS: dict[str, Any] = dict(data_page_size=2**30, max_rows_per_page=2**30)
+NO_PAGE_LIMITS: dict[str, Any] = dict(
+    data_page_size=NO_LIMIT, max_rows_per_page=NO_LIMIT
+)
 # a multiple of the 1024 values mini-batches arrow-rs checks its row limit after,
 # so both implementations cut at the same rows
 ALIGNED_PAGE_LIMITS: dict[str, Any] = dict(max_rows_per_page=20 * 1024)
@@ -136,7 +148,8 @@ def matrix(
 
     cut      PLAIN without page limits, pages end at CDC and row group boundaries;
              the single row group layout is each writer's oracle
-    aligned  PLAIN with a row limit both implementations cut at identically
+    aligned  PLAIN with a row limit both implementations cut at identically,
+             for the writers that can limit the rows of a page
     default  PLAIN with the writers' default page limits
     dict     dictionary encoding with default page limits
     nocdc    CDC disabled, the deduplication baseline
@@ -162,10 +175,11 @@ def matrix(
     for writer in writers:
         formats["cut"] += [writer(row_group_size=num_rows, **plain, **NO_PAGE_LIMITS)]
         formats["cut"] += layouts(writer, **plain, **NO_PAGE_LIMITS)
-        formats["aligned"] += [
-            writer(row_group_size=size, **plain, **ALIGNED_PAGE_LIMITS)
-            for size in (num_rows, largest)
-        ]
+        if writer.page_row_limit:
+            formats["aligned"] += [
+                writer(row_group_size=size, **plain, **ALIGNED_PAGE_LIMITS)
+                for size in (num_rows, largest)
+            ]
         formats["default"] += layouts(writer, **plain)
         formats["dict"] += [
             writer(row_group_size=largest, use_cdc=cdc, compression=compression)

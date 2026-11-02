@@ -11,6 +11,9 @@ from typing import ClassVar, Iterable, Optional
 import tempfile
 from de.core import rewrite_to_parquet_rs
 
+# a page limit large enough to never cut
+NO_LIMIT = 2**30
+
 
 @dataclass(frozen=True)
 class CdcParams:
@@ -75,6 +78,8 @@ class Parquet(FileFormat):
     suffix = "parquet"
     # whether the implementation can write the source in batches
     streaming: ClassVar[bool] = True
+    # whether the implementation can limit the rows of a page
+    page_row_limit: ClassVar[bool] = True
     use_cdc: bool | CdcParams
     compression: Optional[str] = None
     use_dictionary: bool = True
@@ -86,6 +91,8 @@ class Parquet(FileFormat):
     def __post_init__(self):
         if self.batch_size is not None and not self.streaming:
             raise ValueError(f"{self.name} has no write calls to stream batches with")
+        if self.max_rows_per_page not in (None, NO_LIMIT) and not self.page_row_limit:
+            raise ValueError(f"{self.name} has no row limit per page")
 
     @property
     def paramstem(self) -> str:
@@ -235,6 +242,69 @@ class ParquetJava(Parquet):
             check=True,
             capture_output=True,
         )
+
+
+@dataclass(frozen=True)
+class ParquetDuckDB(Parquet):
+    """DuckDB, through a COPY statement run by the binary at DUCKDB_BINARY.
+
+    A COPY has no write calls to batch, so streaming isn't supported. DuckDB's
+    pages have no row limit, only NO_LIMIT is accepted for max_rows_per_page,
+    and NO_LIMIT for data_page_size keeps DuckDB's own 100MiB page limit.
+
+    Row groups are rounded up to whole vectors of 2048 rows, and a source row
+    group less than two vectors short of row_group_size is kept as it is, so
+    small source row groups show through (the benchmark's sources have 1Mi).
+    """
+
+    name = "duckdb"
+    streaming = False
+    page_row_limit = False
+
+    def _rewrite(self, src: Path, dest: Path) -> None:
+        binary = os.environ.get("DUCKDB_BINARY")
+        if not binary:
+            raise RuntimeError("set DUCKDB_BINARY to use duckdb")
+        # left out when disabled, so a duckdb without CDC can write the baseline
+        use_cdc: Optional[str] = "true" if self.use_cdc else None
+        if isinstance(self.use_cdc, CdcParams):
+            cdc = self.use_cdc
+            use_cdc = (
+                f"{{min_chunk_size: {cdc.min_chunk_size}, "
+                f"max_chunk_size: {cdc.max_chunk_size}, norm_level: {cdc.norm_level}}}"
+            )
+        options = dict(
+            format="parquet",
+            content_defined_chunking=use_cdc,
+            # uncompressed by default like the other writers, duckdb's is snappy
+            compression=(
+                "uncompressed"
+                if self.compression in (None, "none")
+                else self.compression
+            ),
+            dictionary_size_limit=None if self.use_dictionary else 0,
+            row_group_size=self.row_group_size,
+            data_page_size_limit=(
+                None if self.data_page_size == NO_LIMIT else self.data_page_size
+            ),
+        )
+        copy = ", ".join(
+            f"{key} {value}" for key, value in options.items() if value is not None
+        )
+        source, target = (str(path).replace("'", "''") for path in (src, dest))
+        result = subprocess.run(
+            [
+                binary,
+                "-c",
+                # columns without nulls would be written as required, unlike the source
+                "SET disabled_optimizers = 'statistics_propagation';"
+                f"COPY (FROM read_parquet('{source}')) TO '{target}' ({copy})",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode:
+            raise RuntimeError(f"duckdb failed: {result.stderr}")
 
 
 @dataclass(frozen=True)

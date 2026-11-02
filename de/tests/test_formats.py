@@ -10,14 +10,17 @@ import pyarrow.parquet as pq
 import pytest
 
 from de.formats import (
+    NO_LIMIT,
     CdcParams,
     JsonLines,
     Parquet,
     ParquetCpp,
+    ParquetDuckDB,
     ParquetJava,
     ParquetRs,
     Sqlite,
 )
+from de.pages import Layout
 from de.synthetic import DataGenerator
 
 
@@ -182,6 +185,12 @@ class TestParquet:
         with pytest.raises(ValueError, match="no write calls"):
             ParquetJava(use_cdc=False, batch_size=10)
 
+    def test_row_limit_needs_a_row_limited_writer(self):
+        with pytest.raises(ValueError, match="no row limit"):
+            ParquetDuckDB(use_cdc=False, max_rows_per_page=10)
+        fmt = ParquetDuckDB(use_cdc=False, max_rows_per_page=NO_LIMIT)
+        assert fmt.paramstem == "rpp=1Gi"
+
     def test_every_field_changes_paramstem(self):
         changed = {
             "use_cdc": True,
@@ -265,6 +274,81 @@ class TestParquetJava:
             "out", data, tmp_path
         )
         assert pq.read_table(path).equals(data)
+
+
+needs_duckdb = pytest.mark.skipif(
+    not os.environ.get("DUCKDB_BINARY"), reason="DUCKDB_BINARY is not set"
+)
+
+
+@needs_duckdb
+class TestParquetDuckDB:
+    def test_row_groups_are_whole_vectors(self, tmp_path):
+        # duckdb rounds row groups up to whole vectors of 2048 rows
+        big_table = pa.table({"x": list(range(10_000))})
+        path = ParquetDuckDB(use_cdc=False, row_group_size=3000).write(
+            "out", big_table, tmp_path
+        )
+        assert row_group_sizes(path) == [4096, 4096, 1808]
+        assert pq.read_metadata(path).created_by.startswith("DuckDB")
+
+    def test_smaller_source_row_groups_are_kept(self, tmp_path):
+        # less than two vectors short of row_group_size
+        src = tmp_path / "src.parquet"
+        pq.write_table(pa.table({"x": list(range(10_000))}), src, row_group_size=1000)
+        path = ParquetDuckDB(use_cdc=False, row_group_size=4096).write(
+            "out", src, tmp_path
+        )
+        assert row_group_sizes(path) == [1000] * 10
+
+    def test_table_and_path_sources_are_identical(self, tmp_path):
+        data = DataGenerator({"a": "int", "b": "str"}).generate_table(10_000)
+        src = tmp_path / "src.parquet"
+        pq.write_table(data, src, row_group_size=4096)
+        fmt = ParquetDuckDB(use_cdc=CDC, compression="snappy", row_group_size=2048)
+        from_table = fmt.write("table", data, tmp_path)
+        from_path = fmt.write("path", src, tmp_path)
+        assert from_table.read_bytes() == from_path.read_bytes()
+
+    def test_nested_schema_round_trips(self, tmp_path):
+        # columns without nulls stay nullable, as they are in the source
+        schema = {"a": "int", "b": "str", "c": ["int"], "d": {"x": "float"}}
+        data = DataGenerator(schema).generate_table(1000)
+        path = ParquetDuckDB(use_cdc=CDC, use_dictionary=False).write(
+            "out", data, tmp_path
+        )
+        assert pq.read_table(path).equals(data)
+
+    @pytest.mark.parametrize("compression", [None, "none"])
+    def test_write_uncompressed_without_dictionary(self, tmp_path, table, compression):
+        # like the other writers, unlike duckdb's own default of snappy
+        path = ParquetDuckDB(
+            use_cdc=False, compression=compression, use_dictionary=False
+        ).write("out", table, tmp_path)
+        column = pq.read_metadata(path).row_group(0).column(0)
+        assert column.compression == "UNCOMPRESSED"
+        assert not column.has_dictionary_page
+
+    def test_paths_with_quotes(self, tmp_path, table):
+        directory = tmp_path / "kszucs's"
+        directory.mkdir()
+        src = directory / "src.parquet"
+        pq.write_table(table, src)
+        path = ParquetDuckDB(use_cdc=False).write("out", src, directory)
+        assert pq.read_table(path).equals(table)
+
+    def test_errors_carry_the_duckdb_message(self, tmp_path, table):
+        fmt = ParquetDuckDB(use_cdc=False, data_page_size=2**31)
+        with pytest.raises(RuntimeError, match="data_page_size_limit cannot be 0"):
+            fmt.write("out", table, tmp_path)
+
+    def test_data_page_size(self, tmp_path):
+        ints = pa.table({"x": list(range(10_000))})
+        fmt = ParquetDuckDB(use_cdc=False, use_dictionary=False)
+        limited = replace(fmt, data_page_size=8 * 1024).write("dp", ints, tmp_path)
+        unlimited = replace(fmt, data_page_size=NO_LIMIT).write("nodp", ints, tmp_path)
+        assert len(Layout.read(limited).cuts(0)) == 9
+        assert Layout.read(unlimited).cuts(0) == []
 
 
 class TestJsonLines:

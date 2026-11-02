@@ -1,5 +1,6 @@
 from collections import Counter
 import json
+import os
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -14,13 +15,17 @@ from de.bench import (
     prepare_sources,
     run,
 )
-from de.formats import CdcParams
+from de.formats import NO_LIMIT, CdcParams
 
 CDC = CdcParams(min_chunk_size=8 * 1024, max_chunk_size=32 * 1024, norm_level=0)
 SCHEMA = {"a": "int"}
 NUM_ROWS = 20_000
 DEFAULTS = [WRITERS[name] for name in DEFAULT_WRITERS]
 EDIT_POINTS = [0.25, 0.75]
+
+needs_duckdb = pytest.mark.skipif(
+    not os.environ.get("DUCKDB_BINARY"), reason="DUCKDB_BINARY is not set"
+)
 
 
 def small_matrix(writers, num_rows=NUM_ROWS):
@@ -109,6 +114,11 @@ class TestMatrix:
         )
         assert [f.batch_size for f in profiles["default"]] == [None]
 
+    def test_writers_without_page_row_limit(self):
+        profiles = small_matrix([WRITERS["duckdb"]])
+        assert profiles["aligned"] == []
+        assert {f.max_rows_per_page for f in profiles["cut"]} == {NO_LIMIT}
+
     def test_selected_profiles(self):
         # deduplication profiles don't need an oracle, so any size is fine
         profiles = matrix(
@@ -180,6 +190,40 @@ class TestRun:
             if row["profile"] == "cut" and row["layout"] == "rg=20000"
         ]
         assert row["pair"] == "parquet-cpp vs parquet-rs"
+        assert row["common"] > 0
+        assert (row["left_only"], row["right_only"]) == (0, 0)
+
+
+@pytest.fixture(scope="module")
+def duckdb_run(sources, tmp_path_factory):
+    run_dir = tmp_path_factory.mktemp("duckdb")
+    return run_dir, run(
+        run_dir, load_sources(sources), small_matrix([WRITERS["duckdb"]])
+    )
+
+
+@needs_duckdb
+class TestDuckDB:
+    def test_keeps_cdc_state(self, duckdb_run):
+        _, results = duckdb_run
+        cuts = [cell for cell in results["cells"] if cell["profile"] == "cut"]
+        assert [cell["layout"] for cell in cuts] == ["rg=20000", "rg=5000"]
+        for cell in cuts:
+            [result] = cell["persistence"]
+            assert (result["recall"], result["extra"], result["aligned"]) == (
+                1.0,
+                0,
+                1.0,
+            )
+
+    def test_oracle_cuts_agree_with_parquet_cpp(self, first_run, duckdb_run):
+        (first, _), (second, _) = first_run, duckdb_run
+        [row] = [
+            row
+            for row in compare_runs([first, second])["cross_impl"]
+            if row["run"] == str(second) and row["layout"] == "rg=20000"
+        ]
+        assert row["pair"] == f"parquet-cpp of {first} vs duckdb"
         assert row["common"] > 0
         assert (row["left_only"], row["right_only"]) == (0, 0)
 

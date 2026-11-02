@@ -4,7 +4,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from de.formats import CdcParams, ParquetCpp, ParquetJava, ParquetRs
+from de.formats import CdcParams, ParquetCpp, ParquetDuckDB, ParquetJava, ParquetRs
 from de.pages import Layout, Persistence, compare, persistence
 from de.synthetic import DataGenerator, evenly_spaced
 
@@ -21,6 +21,12 @@ WRITERS = [
         marks=pytest.mark.skipif(
             not os.environ.get("PARQUET_JAVA_CLASSPATH"),
             reason="PARQUET_JAVA_CLASSPATH is not set",
+        ),
+    ),
+    pytest.param(
+        ParquetDuckDB,
+        marks=pytest.mark.skipif(
+            not os.environ.get("DUCKDB_BINARY"), reason="DUCKDB_BINARY is not set"
         ),
     ),
 ]
@@ -262,12 +268,15 @@ class TestContentDefinedChunking:
         # the pages around each edit and the last one, cuts resync on the content
         assert max(new_pages) <= 2 * len(points) + 1
 
-    def test_cuts_match_parquet_cpp(self, tmp_path, table, oracle):
+    def test_cuts_match_parquet_cpp(self, tmp_path, writer, table, oracle):
         fmt = without_page_limits(ParquetCpp, row_group_size=len(table))
         cpp = Layout.read(fmt.write("cpp", table, tmp_path))
-        assert [oracle.cuts(c) for c in oracle.columns] == [
-            cpp.cuts(c) for c in cpp.columns
-        ]
+        columns = cpp.columns
+        if writer is ParquetDuckDB:
+            # duckdb cuts top level columns only, the list and struct leaves stay whole
+            columns = [0, 1, 4]
+            assert oracle.cuts(2) == oracle.cuts(3) == []
+        assert [oracle.cuts(c) for c in columns] == [cpp.cuts(c) for c in columns]
 
     @pytest.mark.parametrize(
         "row_group_size, batch_size",

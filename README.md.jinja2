@@ -164,6 +164,17 @@ and needs the classpath of parquet-hadoop, e.g. from a parquet-java checkout:
 ❯ de bench runs/java --writer parquet-cpp --writer parquet-rs --writer parquet-java
 ```
 
+DuckDB is opt-in as well: a `COPY ... TO ... (FORMAT parquet)` statement rewrites the
+sources with the binary at `DUCKDB_BINARY`. Content defined chunking needs a build of
+[duckdb#27911](https://github.com/duckdb/duckdb/pull/27911). DuckDB pages have no row
+limit, so it skips the `aligned` profile:
+
+```bash
+❯ gh pr checkout 27911 && GEN=ninja make reldebug
+❯ export DUCKDB_BINARY=$PWD/build/reldebug/duckdb
+❯ de bench runs/duckdb --writer parquet-cpp --writer parquet-rs --writer duckdb
+```
+
 Show the exact pages of a file, or compare the pages of two files:
 
 ```bash
