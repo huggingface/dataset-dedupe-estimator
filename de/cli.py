@@ -3,7 +3,6 @@ from pathlib import Path
 import sys
 
 import click
-import numpy as np
 import pyarrow.parquet as pq
 
 from humanize import naturalsize
@@ -11,11 +10,22 @@ import plotly.io as pio
 import plotly.graph_objects as go
 
 from . import display
+from .bench import (
+    DEFAULT_WRITERS,
+    PROFILES,
+    WRITERS,
+    compare_runs,
+    load_sources,
+    matrix,
+    prepare_sources,
+    run as run_bench,
+)
 from .estimate import estimate
-from .fileutils import checkout_file_revisions, get_page_chunk_sizes
-from .formats import ParquetCpp, ParquetRs, JsonLines, Sqlite, CdcParams
+from .fileutils import checkout_file_revisions
+from .pages import Layout, compare
+from .formats import FileFormat, ParquetCpp, ParquetRs, JsonLines, Sqlite, CdcParams
 from .estimate import compare_formats_tables, compare_formats
-from .synthetic import DataGenerator
+from .synthetic import DataGenerator, evenly_spaced
 
 
 pio.renderers.default = "browser"  # Opens in a new browser tab
@@ -44,7 +54,11 @@ def cli(ctx, plot):
     "--size", "-s", default=1, help="Number of millions or records to generate"
 )
 @click.option(
-    "--num-edits", "-e", default=10, help="Number of changes to make in the data"
+    "--num-edits",
+    "-e",
+    default=10,
+    help="Number of changes to make in the data",
+    type=click.IntRange(min=1),
 )
 @click.option(
     "--edit-size", default=10, help="Number of rows to change in each edit", type=int
@@ -52,6 +66,9 @@ def cli(ctx, plot):
 @click.option("--with-json", is_flag=True, help="Also calculate JSONLines stats")
 @click.option("--with-sqlite", is_flag=True, help="Also calculate SQLite stats")
 @click.option("--use-dictionary", is_flag=True, help="Use parquet dictionary encoding")
+@click.option(
+    "--row-group-size", default=None, help="Parquet row group size in rows", type=int
+)
 @click.option(
     "--cdc-min-size", default=256, help="Minimum CDC chunk size in KiB", type=int
 )
@@ -70,6 +87,7 @@ def synthetic(
     edit_size,
     target_dir,
     use_dictionary,
+    row_group_size,
     with_json,
     with_sqlite,
     cdc_min_size,
@@ -91,14 +109,13 @@ def synthetic(
     directory = Path(target_dir)
     directory.mkdir(exist_ok=True)
 
-    edit_points = np.linspace(0.5 / num_edits, 1 - 0.5 / num_edits, num_edits)
     schema = json.loads(schema)
 
     gen = DataGenerator(schema, seed=42)
     original, tables = gen.generate_synthetic_tables(
         size=size * 2**20,
         edit_size=edit_size,
-        edit_points=list(edit_points),
+        edit_points=evenly_spaced(num_edits),
         append_ratio=0.05,
         update_columns=list(schema.keys()),
     )
@@ -108,23 +125,16 @@ def synthetic(
         max_chunk_size=cdc_max_size * 1024,
         norm_level=cdc_norm_level,
     )
-    formats = [
-        ParquetCpp(use_cdc=False, compression="snappy", use_dictionary=use_dictionary),
-        ParquetCpp(use_cdc=False, compression="zstd", use_dictionary=use_dictionary),
-        ParquetCpp(
-            use_cdc=cdc_params,
-            compression="snappy",
+    formats: list[FileFormat] = [
+        writer(
+            use_cdc=use_cdc,
+            compression=compression,
             use_dictionary=use_dictionary,
-        ),
-        ParquetCpp(
-            use_cdc=cdc_params,
-            compression="zstd",
-            use_dictionary=use_dictionary,
-        ),
-        ParquetRs(use_cdc=False, compression="snappy"),
-        ParquetRs(use_cdc=False, compression="zstd"),
-        ParquetRs(use_cdc=True, compression="snappy"),
-        ParquetRs(use_cdc=True, compression="zstd"),
+            row_group_size=row_group_size,
+        )
+        for writer in (ParquetCpp, ParquetRs)
+        for use_cdc in (False, cdc_params)
+        for compression in ("snappy", "zstd")
     ]
     if with_json:
         formats += [JsonLines(), JsonLines("zstd")]
@@ -212,15 +222,16 @@ def stats(
         max_chunk_size=cdc_max_size * 1024,
         norm_level=cdc_norm_level,
     )
-    params = dict(
-        data_page_size=data_page_size,
-        row_group_size=row_group_size,
-    )
-    formats = [
-        ParquetCpp(use_cdc=False, compression="snappy", **params),
-        ParquetCpp(use_cdc=cdc_params, compression="snappy", **params),
-        ParquetRs(use_cdc=False, compression="snappy"),
-        ParquetRs(use_cdc=True, compression="snappy"),
+    formats: list[FileFormat] = [
+        writer(
+            use_cdc=use_cdc,
+            compression="snappy",
+            data_page_size=data_page_size,
+            row_group_size=row_group_size,
+            batch_size=2**20,
+        )
+        for writer in (ParquetCpp, ParquetRs)
+        for use_cdc in (False, cdc_params)
     ]
     if with_json:
         formats.insert(0, JsonLines())
@@ -253,7 +264,7 @@ def dedup(files):
 @cli.command()
 @click.argument("files", nargs=-1, type=click.Path(exists=True))
 def rewrite(files):
-    fmt = ParquetCpp(use_cdc=True)
+    fmt = ParquetCpp(use_cdc=True, batch_size=2**20)
     for path in files:
         path = Path(path)
         fmt.write(path.stem + "-dedup", path, path.parent)
@@ -281,7 +292,12 @@ def page_chunks(ctx, patterns):
         else:
             paths.append(Path(pattern))
 
-    uncompressed_bytes, num_values = zip(*get_page_chunk_sizes(paths))
+    uncompressed_bytes = [
+        page["uncompressed_bytes"]
+        for path in paths
+        for page in Layout.read(path).pages
+        if page["page_type"] != "dictionary"
+    ]
 
     fig = go.Figure()
 
@@ -347,3 +363,168 @@ def param_impact(ctx, file, directory, row_group_size, data_page_size):
     display.print_table(results)
     if ctx.obj["plot"]:
         display.plot_bars(results)
+
+
+@cli.command()
+@click.argument("run_dir", type=click.Path(file_okay=False, path_type=Path))
+@click.option(
+    "--sources",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    default=None,
+    help="Source files of another run to rewrite, defaults to RUN_DIR/sources",
+)
+@click.option("--schema", default='{"a": "int"}', help="Schema of the generated data")
+@click.option("--num-rows", default=16 * 2**20, help="Rows to generate", type=int)
+@click.option(
+    "--num-edits",
+    default=10,
+    help="Evenly spaced edits to make in the data",
+    type=click.IntRange(min=1),
+)
+@click.option(
+    "--edit-point",
+    "edit_points",
+    multiple=True,
+    type=float,
+    help="Relative position of an edit, repeatable, overrides --num-edits",
+)
+@click.option(
+    "--edit-size", default=10, help="Rows to insert or delete per edit", type=int
+)
+@click.option("--compression", default="snappy", help="Parquet compression")
+@click.option(
+    "--row-group-size",
+    "row_group_sizes",
+    multiple=True,
+    type=int,
+    default=(2**20, 2**18, 2**16),
+    help="Row group size in rows, repeatable",
+)
+@click.option(
+    "--batch-size",
+    "batch_sizes",
+    multiple=True,
+    type=int,
+    default=(100_000,),
+    help="Streaming batch size in rows, repeatable",
+)
+@click.option(
+    "--writer",
+    "writers",
+    multiple=True,
+    type=click.Choice(list(WRITERS)),
+    default=DEFAULT_WRITERS,
+    help="Writer implementation, repeatable",
+)
+@click.option(
+    "--cdc-min-size", default=256, help="Minimum CDC chunk size in KiB", type=int
+)
+@click.option(
+    "--cdc-max-size", default=1024, help="Maximum CDC chunk size in KiB", type=int
+)
+@click.option("--cdc-norm-level", default=0, help="CDC normalization level", type=int)
+@click.option(
+    "--profile",
+    "profiles",
+    multiple=True,
+    type=click.Choice(PROFILES),
+    default=PROFILES,
+    help="Profile to run, repeatable",
+)
+@click.option(
+    "--max-workers",
+    default=None,
+    type=int,
+    help="Files written and estimated concurrently",
+)
+@click.option(
+    "--no-sanity-check", is_flag=True, help="Skip sanity check after writing files"
+)
+def bench(
+    run_dir,
+    sources,
+    schema,
+    num_rows,
+    num_edits,
+    edit_points,
+    edit_size,
+    compression,
+    row_group_sizes,
+    batch_sizes,
+    writers,
+    cdc_min_size,
+    cdc_max_size,
+    cdc_norm_level,
+    profiles,
+    max_workers,
+    no_sanity_check,
+):
+    """Measure how parquet writers keep CDC page cuts across row groups.
+
+    Rewrites the same generated data with every writer, row group size and
+    streaming batch size, saves the results to RUN_DIR/results.json and shows
+    them. Run it once per environment, e.g. with a pyarrow build of another
+    Arrow branch, then compare the runs:
+
+    \b
+    de bench runs/stock
+    de bench runs/cdc-branch --sources runs/stock/sources --writer parquet-cpp
+    de compare runs/stock runs/cdc-branch
+    """
+    if sources is None:
+        sources = run_dir / "sources"
+        points = list(edit_points) or evenly_spaced(num_edits)
+        manifest = prepare_sources(
+            sources, json.loads(schema), num_rows, points, edit_size
+        )
+    else:
+        manifest = load_sources(sources)
+    cdc = CdcParams(
+        min_chunk_size=cdc_min_size * 1024,
+        max_chunk_size=cdc_max_size * 1024,
+        norm_level=cdc_norm_level,
+    )
+    formats = matrix(
+        [WRITERS[name] for name in writers],
+        manifest["num_rows"],
+        cdc,
+        compression,
+        list(row_group_sizes),
+        list(batch_sizes),
+        profiles,
+    )
+    run_bench(
+        run_dir,
+        manifest,
+        formats,
+        sanity_check=not no_sanity_check,
+        max_workers=max_workers,
+    )
+    display.print_report(compare_runs([run_dir]))
+
+
+@cli.command("compare")
+@click.argument(
+    "run_dirs",
+    nargs=-1,
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+def compare_command(run_dirs):
+    """Compare saved benchmark runs, the first run is the baseline."""
+    display.print_report(compare_runs(list(run_dirs)))
+
+
+@cli.command()
+@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def pages(file):
+    """Show the exact page layout of a parquet file."""
+    display.print_pages(Layout.read(file))
+
+
+@cli.command("page-diff")
+@click.argument("left", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("right", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+def page_diff(left, right):
+    """Compare the page boundaries and page bytes of two parquet files."""
+    display.print_page_diffs(compare(Layout.read(left), Layout.read(right)))

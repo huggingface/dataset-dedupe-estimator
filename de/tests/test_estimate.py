@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
@@ -9,6 +10,7 @@ from de.estimate import (
     estimate,
     compare_formats_tables,
     compare_formats,
+    write_formats_tables,
 )
 from de.formats import ParquetCpp
 
@@ -38,7 +40,20 @@ class TestEstimateDe:
             "de.estimate._estimate_de", return_value=(100, 50, 25)
         ) as mock, patch("de.estimate._estimate_xet", return_value=10):
             estimate([Path("a.parquet"), Path("b.parquet")])
-        mock.assert_called_once_with(["a.parquet", "b.parquet"])
+        mock.assert_called_once_with(["a.parquet", "b.parquet"], True)
+
+
+class TestEstimate:
+    def test_plot_writes_chunk_images(self, tmp_path, table):
+        path = tmp_path / "a.parquet"
+        pq.write_table(table, path)
+        estimate([path], plot=False)
+        assert list(tmp_path.glob("*.png")) == []
+        estimate([path])
+        assert {p.name for p in tmp_path.glob("*.png")} == {
+            "a.parquet.png",
+            "merged.png",
+        }
 
 
 class TestCompareFormatsTables:
@@ -115,6 +130,36 @@ class TestCompareFormatsTables:
         assert len(results) == 1
         assert results[0].group == "combined"
         assert results[0].format.paramstem == ""
+
+    def test_records_in_input_order(self, tmp_path, table, edit):
+        formats = [ParquetCpp(use_cdc=False), ParquetCpp(use_cdc=True)]
+        results = compare_formats_tables(
+            formats,
+            {"b": {"original": table, "b": edit}, "a": {"original": table, "a": edit}},
+            tmp_path,
+        )
+        assert [(r.group, r.format) for r in results] == [
+            ("b", formats[0]),
+            ("b", formats[1]),
+            ("a", formats[0]),
+            ("a", formats[1]),
+        ]
+
+
+class TestWriteFormatsTables:
+    def test_paths_in_input_order(self, tmp_path, table, edit):
+        formats = [ParquetCpp(use_cdc=False), ParquetCpp(use_cdc=True)]
+        with ThreadPoolExecutor() as executor:
+            written = write_formats_tables(
+                formats, {"g": {"original": table, "edit": edit}}, tmp_path, executor
+            )
+        assert list(written) == [("g", formats[0]), ("g", formats[1])]
+        for (group, fmt), paths in written.items():
+            assert paths == [
+                fmt.derive_path(name, tmp_path / group / fmt.name)
+                for name in ("original", "edit")
+            ]
+            assert all(path.exists() for path in paths)
 
 
 class TestCompareFormats:
