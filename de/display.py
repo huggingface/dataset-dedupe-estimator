@@ -230,10 +230,12 @@ def _parity_cell(result: Optional[Parity]) -> Text:
         return Text("n/a", style="dim")
     if result.error is not None:
         return Text("error", style="bold red")
+    empty = f", {result.empty_pages:,} empty" if result.empty_pages else ""
     if result.different_cuts:
-        return Text(f"{result.different_cuts:,} cuts", style="red")
+        return Text(f"{result.different_cuts:,} cuts{empty}", style="red")
     if result.different_pages:
-        return Text(f"{result.different_pages:,}/{result.pages:,}", style="yellow")
+        pages = f"{result.different_pages:,}/{result.pages:,}"
+        return Text(f"{pages}{empty}", style="yellow")
     return Text("✓", style="green")
 
 
@@ -251,8 +253,9 @@ def print_parity(report: dict) -> None:
     cells = {(r.writer, r.datatype, r.case): r for r in results}
     console.print(
         "Pages against parquet-cpp's: ✓ identical, N cuts in only one of the files, "
-        "N/M of the writer's pages with different bytes than parquet-cpp's M pages "
-        "(headers aside), n/a when the writer can't express the case"
+        "N/M of the M pages unmatched by a diff of the pages (row group, values and "
+        "bytes, headers aside), K empty data pages, n/a when the writer can't "
+        "express the case"
     )
     for writer in dict.fromkeys(result.writer for result in results):
         _print_rows(
@@ -273,13 +276,17 @@ def print_parity(report: dict) -> None:
                 ),
             ],
         )
+    # each distinct error once per writer, e.g. a missing PARQUET_JAVA_CLASSPATH
+    errors: dict[tuple[str, str], list[str]] = {}
     for result in results:
         if result.error is not None:
-            first_line = result.error.strip().splitlines()[0]
-            console.print(
-                f"[red]{result.writer} {result.case} {result.datatype}[/red]: "
-                f"{first_line}"
-            )
+            line = result.error.strip().splitlines()[0]
+            cell = f"{result.case} {result.datatype}"
+            errors.setdefault((result.writer, line), []).append(cell)
+    for (writer, line), failed in errors.items():
+        where = failed[0] if len(failed) == 1 else f"{len(failed)} cells"
+        # assembled as plain text, errors may contain brackets rich would parse
+        console.print(Text.assemble((f"{writer} {where}", "red"), f": {line}"))
 
 
 def _print_rows(

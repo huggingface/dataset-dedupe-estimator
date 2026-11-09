@@ -1,13 +1,14 @@
 """Page parity of parquet writers with parquet-cpp.
 
 Every writer writes the same tables, one per datatype, with the settings of each
-case, and its pages are compared to parquet-cpp's: the cuts, then the payloads.
-Payloads are compared without the page headers, which carry each writer's
-statistics.
+case, and its pages are diffed with parquet-cpp's: the row group, the number of
+values and the payload bytes of each page. Payloads are compared without the page
+headers, which carry each writer's statistics.
 """
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from pathlib import Path
 import re
 from typing import Any, Optional
@@ -17,7 +18,7 @@ from tqdm import tqdm
 
 from .bench import MAX_ROW_GROUP_SIZE, NO_PAGE_LIMITS
 from .formats import CdcParams, Parquet, ParquetCpp
-from .pages import Layout, compare
+from .pages import Layout
 from .synthetic import DataGenerator
 
 # a single leaf column each
@@ -65,13 +66,16 @@ class Parity:
     case: str
     datatype: str
     writer: str
-    # parquet-cpp's dictionary and data pages
+    # the dictionary and data pages of the file with more pages
     pages: int
     # page cuts in only one of the files
     different_cuts: int
-    # the writer's pages without a byte-identical payload in parquet-cpp's file
+    # pages of the file with more pages left unmatched by a diff of the two files'
+    # pages, matching in row group, values and payload bytes (headers aside)
     different_pages: int
-    # why the writer failed, e.g. it wrote a file that can't be read back
+    # the writer's data pages without values, parquet-cpp writes none
+    empty_pages: int
+    # why the writer or parquet-cpp failed, e.g. a file that can't be read back
     error: Optional[str]
 
 
@@ -95,7 +99,8 @@ def parity(
     }
     # parquet-cpp is written once, as the reference
     unique: list[type[Parquet]] = list(dict.fromkeys([ParquetCpp, *writers]))
-    futures: dict[tuple[str, str, str], Future[Path]] = {}
+    # the written file of each writer per (case, datatype)
+    futures: dict[tuple[str, str], dict[str, Future[Path]]] = {}
     with ThreadPoolExecutor(max_workers) as executor:
         for case, params in CASES.items():
             for writer in unique:
@@ -107,36 +112,63 @@ def parity(
                 out.mkdir(parents=True, exist_ok=True)
                 for datatype, table in tables.items():
                     stem = re.sub(r"[^a-z0-9]+", "-", datatype).strip("-")
-                    futures[case, datatype, fmt.name] = executor.submit(
-                        fmt.write, stem, table, out
+                    futures.setdefault((case, datatype), {})[fmt.name] = (
+                        executor.submit(fmt.write, stem, table, out)
                     )
-        for _ in tqdm(as_completed(futures.values()), total=len(futures)):
+        pending = [f for written in futures.values() for f in written.values()]
+        for _ in tqdm(as_completed(pending), total=len(pending)):
             pass
 
     created_by: dict[str, str] = {}
     results = []
-    for (case, datatype, name), future in futures.items():
-        error = future.exception()
-        if error is None:
-            created_by.setdefault(name, pq.read_metadata(future.result()).created_by)
-        if name == ParquetCpp.name:
+    for (case, datatype), written in futures.items():
+        for name, future in written.items():
+            if name not in created_by and future.exception() is None:
+                created_by[name] = pq.read_metadata(future.result()).created_by
+        reference = written.pop(ParquetCpp.name)
+        if reference.exception() is not None:
+            error = reference.exception()
+            message = f"parquet-cpp failed: {type(error).__name__}: {error}"
+            results += [
+                Parity(case, datatype, name, 0, 0, 0, 0, message) for name in written
+            ]
             continue
-        cpp = Layout.read(futures[case, datatype, ParquetCpp.name].result())
-        pages = sum(len(cpp.column_pages(column)) for column in cpp.columns)
-        if error is not None:
-            message = f"{type(error).__name__}: {error}"
-            results.append(Parity(case, datatype, name, pages, 0, 0, message))
-            continue
-        diffs = compare(cpp, Layout.read(future.result()))
-        results.append(
-            Parity(
-                case,
-                datatype,
-                name,
-                pages,
-                different_cuts=sum(d.left_only_cuts + d.right_only_cuts for d in diffs),
-                different_pages=sum(d.new_payloads for d in diffs),
-                error=None,
+        cpp = Layout.read(reference.result())
+        for name, future in written.items():
+            error = future.exception()
+            if error is not None:
+                message = f"{type(error).__name__}: {error}"
+                results.append(Parity(case, datatype, name, 0, 0, 0, 0, message))
+                continue
+            layout = Layout.read(future.result())
+            pages = different_cuts = different_pages = empty_pages = 0
+            for column in cpp.columns:
+                different_cuts += len(set(cpp.cuts(column)) ^ set(layout.cuts(column)))
+                empty_pages += layout.empty_pages(column)
+                expected, actual = (
+                    [
+                        (p["row_group"], p["num_values"], p["payload_hash"])
+                        for p in side.column_pages(column)
+                    ]
+                    for side in (cpp, layout)
+                )
+                # a diff, so an extra or a missing page doesn't shift the rest
+                matcher = SequenceMatcher(None, expected, actual, autojunk=False)
+                longer = max(len(expected), len(actual))
+                pages += longer
+                different_pages += longer - sum(
+                    block.size for block in matcher.get_matching_blocks()
+                )
+            results.append(
+                Parity(
+                    case,
+                    datatype,
+                    name,
+                    pages,
+                    different_cuts,
+                    different_pages,
+                    empty_pages,
+                    error=None,
+                )
             )
-        )
     return dict(created_by=created_by, results=results)
