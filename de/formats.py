@@ -138,7 +138,11 @@ class Parquet(FileFormat):
                     == dst_meta.schema.to_arrow_schema()
                 )
             else:
-                assert src.equals(pq.read_table(dest))
+                written = pq.read_table(dest)
+                assert src.equals(written), (
+                    f"{dest.name} reads back different data, "
+                    f"{written.num_rows} of {src.num_rows} rows"
+                )
         return dest
 
     def _write(self, src: pa.Table | Path, dest: Path) -> None:
@@ -236,12 +240,16 @@ class ParquetJava(Parquet):
             max_rows_per_page=self.max_rows_per_page,
         )
         program = Path(__file__).parent / "java" / "ParquetRewrite.java"
-        subprocess.run(
-            ["java", "-cp", classpath, str(program), str(src), str(dest)]
+        result = subprocess.run(
+            # only errors are logged, so stderr holds just the exception
+            ["java", "-Dorg.slf4j.simpleLogger.defaultLogLevel=error"]
+            + ["-cp", classpath, str(program), str(src), str(dest)]
             + [f"{key}={value}" for key, value in options.items() if value is not None],
-            check=True,
             capture_output=True,
+            text=True,
         )
+        if result.returncode:
+            raise RuntimeError(f"parquet-java failed: {result.stderr}")
 
 
 @dataclass(frozen=True)

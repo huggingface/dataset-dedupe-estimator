@@ -184,6 +184,18 @@ Show the exact pages of a file, or compare the pages of two files:
     runs/stock/cut/parquet-rs/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet
 ```
 
+Check where the writers write exactly the same pages as parquet-cpp: every writer
+writes a table per datatype with the settings of each case (PLAIN in a single row
+group, row groups, a row or size limit per page, dictionary, snappy and zstd). A
+cell is identical, has cuts in only one of the files, or has pages with the same
+cuts but different bytes (headers aside). The files are kept to inspect any cell
+with `de page-diff`:
+
+```bash
+❯ de parity runs/parity --writer parquet-rs --writer parquet-java --writer duckdb
+❯ de page-diff runs/parity/plain/parquet-cpp/list-int-*.parquet runs/parity/plain/parquet-java/list-int-*.parquet
+```
+
 
 # Results on Synthetic Data
 

@@ -31,10 +31,15 @@ WRITERS = [
     ),
 ]
 
+NUM_ROWS = 100_000
+
 # the first chunk boundary of column a, a row group ending right before or at it
 # exercises the size, match and hash state the chunker carries over
 FIRST_CUT = 1674
 ROW_GROUP_SIZES = [30_011, 7_001, FIRST_CUT - 1, FIRST_CUT]
+# multiples of the 2048 row vectors duckdb rounds row groups up to, the second
+# starts a row group at a chunk boundary of columns b and z (16384)
+VECTOR_ROW_GROUP_SIZES = [30 * 2048, 8 * 2048]
 
 
 @pytest.fixture(scope="module")
@@ -44,7 +49,7 @@ def ints():
 
 @pytest.fixture(scope="module")
 def table():
-    return DataGenerator(SCHEMA).generate_table(100_000)
+    return DataGenerator(SCHEMA).generate_table(NUM_ROWS)
 
 
 @pytest.fixture(scope="module", params=WRITERS, ids=lambda writer: writer.name)
@@ -177,6 +182,15 @@ class TestCompare:
         assert (diff.left_only_cuts, diff.right_only_cuts) == (0, 0)
         assert diff.first_divergence is None
         assert diff.new_bytes == 0
+        assert diff.new_payloads == 0
+
+    def test_only_headers_differ(self, tmp_path):
+        left = write_ints(tmp_path / "left.parquet", write_statistics=False)
+        right = write_ints(tmp_path / "right.parquet")
+        [diff] = compare(Layout.read(left), Layout.read(right))
+        # the statistics are in the page headers, the levels and values are the same
+        assert diff.new_bytes == diff.right_bytes
+        assert diff.new_payloads == 0
 
     def test_different_page_limits(self, tmp_path):
         left = write_ints(
@@ -193,6 +207,7 @@ class TestCompare:
         assert diff.first_divergence == 10
         # the 10-row pages [40, 50) and [90, 100) are identical in both files
         assert 0 < diff.new_bytes < diff.right_bytes
+        assert diff.new_payloads == 4
 
     def test_column_missing_on_the_left(self, tmp_path):
         left, right = tmp_path / "left.parquet", tmp_path / "right.parquet"
@@ -268,15 +283,28 @@ class TestContentDefinedChunking:
         # the pages around each edit and the last one, cuts resync on the content
         assert max(new_pages) <= 2 * len(points) + 1
 
-    def test_cuts_match_parquet_cpp(self, tmp_path, writer, table, oracle):
-        fmt = without_page_limits(ParquetCpp, row_group_size=len(table))
-        cpp = Layout.read(fmt.write("cpp", table, tmp_path))
-        columns = cpp.columns
-        if writer is ParquetDuckDB:
-            # duckdb cuts top level columns only, the list and struct leaves stay whole
-            columns = [0, 1, 4]
-            assert oracle.cuts(2) == oracle.cuts(3) == []
-        assert [oracle.cuts(c) for c in columns] == [cpp.cuts(c) for c in columns]
+    @pytest.mark.parametrize("row_group_size", [NUM_ROWS, *VECTOR_ROW_GROUP_SIZES])
+    def test_pages_match_parquet_cpp(self, tmp_path, writer, table, row_group_size):
+        """Every writer writes the same data pages as parquet-cpp, byte for byte.
+
+        Only the payloads are compared: the headers carry each writer's statistics,
+        and the files are uncompressed as the writers' codecs differ (e.g. snappy).
+        """
+        cpp, layout = (
+            Layout.read(
+                without_page_limits(w, row_group_size=row_group_size).write(
+                    w.name, table, tmp_path
+                )
+            )
+            for w in (ParquetCpp, writer)
+        )
+        # duckdb cuts top level columns only, the list and struct leaves stay whole
+        columns = [0, 1, 4] if writer is ParquetDuckDB else cpp.columns
+        # the same pages in the same row groups, then the same bytes in them
+        assert [layout.spans(c) for c in columns] == [cpp.spans(c) for c in columns]
+        assert [
+            [p["payload_hash"] for p in layout.column_pages(c)] for c in columns
+        ] == [[p["payload_hash"] for p in cpp.column_pages(c)] for c in columns]
 
     @pytest.mark.parametrize(
         "row_group_size, batch_size",

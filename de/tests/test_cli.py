@@ -234,6 +234,14 @@ class TestBenchCommands:
         assert result.exit_code == 0, result.output
         assert "First Divergence" in result.output
 
+    def test_parity(self, runner, tmp_path):
+        result = runner.invoke(
+            cli, ["parity", str(tmp_path), "--num-rows", "2000"], env={"COLUMNS": "200"}
+        )
+        assert result.exit_code == 0, result.output
+        assert "list<struct<int>>" in result.output
+        assert (tmp_path / "plain" / "parquet-rs").is_dir()
+
     def test_page_chunks(self, runner, tmp_path):
         path = tmp_path / "x.parquet"
         pq.write_table(pa.table({"a": list(range(100))}), path)

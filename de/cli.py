@@ -23,6 +23,7 @@ from .bench import (
 from .estimate import estimate
 from .fileutils import checkout_file_revisions
 from .pages import Layout, compare
+from .parity import parity
 from .formats import FileFormat, ParquetCpp, ParquetRs, JsonLines, Sqlite, CdcParams
 from .estimate import compare_formats_tables, compare_formats
 from .synthetic import DataGenerator, evenly_spaced
@@ -513,6 +514,52 @@ def bench(
 def compare_command(run_dirs):
     """Compare saved benchmark runs, the first run is the baseline."""
     display.print_report(compare_runs(list(run_dirs)))
+
+
+@cli.command("parity")
+@click.argument("directory", type=click.Path(file_okay=False, path_type=Path))
+@click.option("--num-rows", default=100_000, help="Rows per datatype", type=int)
+@click.option(
+    "--writer",
+    "writers",
+    multiple=True,
+    type=click.Choice(list(WRITERS)),
+    default=DEFAULT_WRITERS,
+    help="Writer implementation compared to parquet-cpp, repeatable",
+)
+@click.option("--cdc-min-size", default=8, help="Minimum CDC chunk size in KiB")
+@click.option("--cdc-max-size", default=32, help="Maximum CDC chunk size in KiB")
+@click.option("--cdc-norm-level", default=0, help="CDC normalization level")
+@click.option(
+    "--max-workers", default=None, type=int, help="Files written concurrently"
+)
+def parity_command(
+    directory,
+    num_rows,
+    writers,
+    cdc_min_size,
+    cdc_max_size,
+    cdc_norm_level,
+    max_workers,
+):
+    """Compare the pages of every writer to parquet-cpp's, per datatype and case.
+
+    The files are kept in DIRECTORY, compare a cell's pages with page-diff:
+
+    \b
+    de parity runs/parity --writer parquet-rs --writer parquet-java --writer duckdb
+    de page-diff runs/parity/plain/parquet-cpp/list-int-*.parquet \\
+        runs/parity/plain/parquet-java/list-int-*.parquet
+    """
+    cdc = CdcParams(
+        min_chunk_size=cdc_min_size * 1024,
+        max_chunk_size=cdc_max_size * 1024,
+        norm_level=cdc_norm_level,
+    )
+    report = parity(
+        directory, [WRITERS[name] for name in writers], num_rows, cdc, max_workers
+    )
+    display.print_parity(report)
 
 
 @cli.command()

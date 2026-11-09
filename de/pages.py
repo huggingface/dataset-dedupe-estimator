@@ -100,6 +100,8 @@ class PageDiff:
     right_bytes: int
     # bytes of the right file's pages not found byte-identical in the left file
     new_bytes: int
+    # pages of the right file whose payload, the header aside, isn't in the left file
+    new_payloads: int
 
 
 def compare(left: Layout, right: Layout) -> list[PageDiff]:
@@ -109,6 +111,7 @@ def compare(left: Layout, right: Layout) -> list[PageDiff]:
         left_cuts, right_cuts = set(left.cuts(column)), set(right.cuts(column))
         different = left_cuts ^ right_cuts
         left_hashes = {p["page_hash"] for p in left.column_pages(column)}
+        left_payloads = {p["payload_hash"] for p in left.column_pages(column)}
         right_pages = right.column_pages(column)
         sizes = [p["header_bytes"] + p["compressed_bytes"] for p in right_pages]
         new = sum(
@@ -128,6 +131,9 @@ def compare(left: Layout, right: Layout) -> list[PageDiff]:
                 first_divergence=min(different) if different else None,
                 right_bytes=sum(sizes),
                 new_bytes=new,
+                new_payloads=sum(
+                    page["payload_hash"] not in left_payloads for page in right_pages
+                ),
             )
         )
     return diffs

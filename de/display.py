@@ -1,4 +1,5 @@
 from dataclasses import asdict
+from typing import Optional
 
 from humanize import naturalsize
 from rich.bar import Bar
@@ -8,6 +9,7 @@ from rich.text import Text
 import plotly.graph_objects as go
 
 from .pages import Layout, PageDiff
+from .parity import Parity
 
 
 def _bar_color(r, numfiles):
@@ -218,8 +220,66 @@ def print_page_diffs(diffs: list[PageDiff]) -> None:
                 ),
             ),
             ("New Bytes", lambda row: f"{row['new_bytes'] / row['right_bytes']:.1%}"),
+            ("New Payloads", lambda row: f"{row['new_payloads']:,}"),
         ],
     )
+
+
+def _parity_cell(result: Optional[Parity]) -> Text:
+    if result is None:
+        return Text("n/a", style="dim")
+    if result.error is not None:
+        return Text("error", style="bold red")
+    if result.different_cuts:
+        return Text(f"{result.different_cuts:,} cuts", style="red")
+    if result.different_pages:
+        return Text(f"{result.different_pages:,}/{result.pages:,}", style="yellow")
+    return Text("✓", style="green")
+
+
+def print_parity(report: dict) -> None:
+    """Display each writer's page parity with parquet-cpp per datatype and case."""
+    console = Console()
+    writers = _table("<Writer", "<Created By")
+    for writer, created_by in report["created_by"].items():
+        writers.add_row(writer, created_by)
+    console.print(writers)
+
+    results = report["results"]
+    cases = list(dict.fromkeys(result.case for result in results))
+    datatypes = list(dict.fromkeys(result.datatype for result in results))
+    cells = {(r.writer, r.datatype, r.case): r for r in results}
+    console.print(
+        "Pages against parquet-cpp's: ✓ identical, N cuts in only one of the files, "
+        "N/M of the writer's pages with different bytes than parquet-cpp's M pages "
+        "(headers aside), n/a when the writer can't express the case"
+    )
+    for writer in dict.fromkeys(result.writer for result in results):
+        _print_rows(
+            console,
+            writer,
+            [dict(datatype=datatype) for datatype in datatypes],
+            (),
+            [
+                ("<Datatype", lambda row: row["datatype"]),
+                *(
+                    (
+                        f"<{case}",
+                        lambda row, case=case, writer=writer: _parity_cell(
+                            cells.get((writer, row["datatype"], case))
+                        ),
+                    )
+                    for case in cases
+                ),
+            ],
+        )
+    for result in results:
+        if result.error is not None:
+            first_line = result.error.strip().splitlines()[0]
+            console.print(
+                f"[red]{result.writer} {result.case} {result.datatype}[/red]: "
+                f"{first_line}"
+            )
 
 
 def _print_rows(
