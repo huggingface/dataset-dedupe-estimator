@@ -11,7 +11,7 @@ import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RawLocalFileSystem;
-import org.apache.parquet.column.CdcOptions;
+import org.apache.parquet.column.ContentDefinedChunkingOptions;
 import org.apache.parquet.example.data.Group;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetFileWriter;
@@ -53,13 +53,14 @@ public class ParquetRewrite {
         case "use_cdc":
           if (value.contains(",")) {
             String[] cdc = value.split(",");
-            builder.withContentDefinedChunking(CdcOptions.builder()
+            builder.withContentDefinedChunking(ContentDefinedChunkingOptions.builder()
                 .withMinChunkSize(Long.parseLong(cdc[0]))
                 .withMaxChunkSize(Long.parseLong(cdc[1]))
                 .withNormLevel(Integer.parseInt(cdc[2]))
                 .build());
           } else {
-            builder.withContentDefinedChunking(Boolean.parseBoolean(value));
+            builder.withContentDefinedChunking(
+                Boolean.parseBoolean(value) ? ContentDefinedChunkingOptions.DEFAULT : null);
           }
           break;
         case "compression":
