@@ -14,6 +14,15 @@ from de.core import rewrite_to_parquet_rs
 # a page limit large enough to never cut
 NO_LIMIT = 2**30
 
+# the encodings of parquet-java's and parquet-rs's writer version 2.0 for values that
+# aren't dictionary encoded, by physical type: the others are PLAIN, booleans RLE
+V2_ENCODINGS = {
+    "INT32": "DELTA_BINARY_PACKED",
+    "INT64": "DELTA_BINARY_PACKED",
+    "BYTE_ARRAY": "DELTA_BYTE_ARRAY",
+    "FIXED_LEN_BYTE_ARRAY": "DELTA_BYTE_ARRAY",
+}
+
 
 @dataclass(frozen=True)
 class CdcParams:
@@ -73,6 +82,10 @@ class Parquet(FileFormat):
     With `batch_size=None` the whole source is written with a single write call
     (e.g. `pq.write_table`), otherwise it is streamed in batches of exactly
     `batch_size` rows, one write call per batch.
+
+    `data_page_version="2.0"` writes v2 data pages with the encodings of
+    parquet-java's and parquet-rs's writer version 2.0: values that aren't
+    dictionary encoded are delta encoded if they are integers or byte arrays.
     """
 
     suffix = "parquet"
@@ -80,15 +93,22 @@ class Parquet(FileFormat):
     streaming: ClassVar[bool] = True
     # whether the implementation can limit the rows of a page
     page_row_limit: ClassVar[bool] = True
+    # whether the implementation can write v2 data pages
+    data_page_v2: ClassVar[bool] = True
     use_cdc: bool | CdcParams
     compression: Optional[str] = None
     use_dictionary: bool = True
     row_group_size: Optional[int] = None
     data_page_size: Optional[int] = None
     max_rows_per_page: Optional[int] = None
+    data_page_version: str = "1.0"
     batch_size: Optional[int] = None
 
     def __post_init__(self):
+        if self.data_page_version not in ("1.0", "2.0"):
+            raise ValueError(f"unknown data page version: {self.data_page_version}")
+        if self.data_page_version == "2.0" and not self.data_page_v2:
+            raise ValueError(f"{self.name} writes no v2 data pages")
         if self.batch_size is not None and not self.streaming:
             raise ValueError(f"{self.name} has no write calls to stream batches with")
         if self.max_rows_per_page not in (None, NO_LIMIT) and not self.page_row_limit:
@@ -115,6 +135,8 @@ class Parquet(FileFormat):
             parts.append(f"dp={exact_size(self.data_page_size)}")
         if self.max_rows_per_page is not None:
             parts.append(f"rpp={exact_size(self.max_rows_per_page)}")
+        if self.data_page_version == "2.0":
+            parts.append("v2")
         if self.batch_size is not None:
             parts.append(f"stream={exact_size(self.batch_size)}")
         return " ".join(parts)
@@ -178,7 +200,24 @@ class ParquetCpp(Parquet):
             use_content_defined_chunking=cdc,
             data_page_size=self.data_page_size,
             max_rows_per_page=self.max_rows_per_page,
+            data_page_version=self.data_page_version,
+            # the page statistics go to the page index instead of every page header,
+            # so the page headers carry no statistics, like parquet-rs's and
+            # parquet-java's, and the same pages can have the same bytes
+            write_page_index=True,
         )
+        if self.data_page_version == "2.0" and not self.use_dictionary:
+            # parquet-cpp keeps PLAIN with v2 pages, the leaf columns and their
+            # physical types are read from an empty file of the schema
+            schema = src.schema if isinstance(src, pa.Table) else pq.read_schema(src)
+            empty = pa.BufferOutputStream()
+            pq.write_table(schema.empty_table(), empty)
+            columns = pq.ParquetFile(pa.BufferReader(empty.getvalue())).schema
+            kwargs["column_encoding"] = {
+                column.path: V2_ENCODINGS[column.physical_type]
+                for column in columns
+                if column.physical_type in V2_ENCODINGS
+            }
         if self.batch_size is None:
             if isinstance(src, Path):
                 src = pq.read_table(src).combine_chunks()
@@ -238,6 +277,7 @@ class ParquetJava(Parquet):
             row_group_size=self.row_group_size,
             data_page_size=self.data_page_size,
             max_rows_per_page=self.max_rows_per_page,
+            data_page_version=self.data_page_version,
         )
         program = Path(__file__).parent / "java" / "ParquetRewrite.java"
         result = subprocess.run(
@@ -258,7 +298,8 @@ class ParquetDuckDB(Parquet):
 
     A COPY has no write calls to batch, so streaming isn't supported. DuckDB's
     pages have no row limit, only NO_LIMIT is accepted for max_rows_per_page,
-    and NO_LIMIT for data_page_size keeps DuckDB's own 100MiB page limit.
+    and NO_LIMIT for data_page_size keeps DuckDB's own 100MiB page limit. Its
+    pages are always v1, PARQUET_VERSION V2 only changes the encodings.
 
     Row groups are rounded up to whole vectors of 2048 rows, and a source row
     group less than two vectors short of row_group_size is kept as it is, so
@@ -268,6 +309,7 @@ class ParquetDuckDB(Parquet):
     name = "duckdb"
     streaming = False
     page_row_limit = False
+    data_page_v2 = False
 
     def _rewrite(self, src: Path, dest: Path) -> None:
         binary = os.environ.get("DUCKDB_BINARY")

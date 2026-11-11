@@ -240,7 +240,8 @@ def _parity_cell(result: Optional[Parity]) -> Text:
 
 
 def print_parity(report: dict) -> None:
-    """Display each writer's page parity with parquet-cpp per datatype and case."""
+    """Display each writer's page parity with parquet-cpp per page version, datatype
+    and case."""
     console = Console()
     writers = _table("<Writer", "<Created By")
     for writer, created_by in report["created_by"].items():
@@ -248,9 +249,10 @@ def print_parity(report: dict) -> None:
     console.print(writers)
 
     results = report["results"]
+    page_versions = list(dict.fromkeys(result.page_version for result in results))
     cases = list(dict.fromkeys(result.case for result in results))
     datatypes = list(dict.fromkeys(result.datatype for result in results))
-    cells = {(r.writer, r.datatype, r.case): r for r in results}
+    cells = {(r.writer, r.page_version, r.datatype, r.case): r for r in results}
     console.print(
         "Pages against parquet-cpp's: ✓ identical, N cuts in only one of the files, "
         "N/M of the M pages unmatched by a diff of the pages (row group, values and "
@@ -258,30 +260,31 @@ def print_parity(report: dict) -> None:
         "express the case"
     )
     for writer in dict.fromkeys(result.writer for result in results):
-        _print_rows(
-            console,
-            writer,
-            [dict(datatype=datatype) for datatype in datatypes],
-            (),
-            [
-                ("<Datatype", lambda row: row["datatype"]),
-                *(
-                    (
-                        f"<{case}",
-                        lambda row, case=case, writer=writer: _parity_cell(
-                            cells.get((writer, row["datatype"], case))
-                        ),
-                    )
-                    for case in cases
-                ),
-            ],
-        )
+        for page_version in page_versions:
+            _print_rows(
+                console,
+                f"{writer}, {page_version} data pages",
+                [dict(datatype=datatype) for datatype in datatypes],
+                (),
+                [
+                    ("<Datatype", lambda row: row["datatype"]),
+                    *(
+                        (
+                            f"<{case}",
+                            lambda row, key=(writer, page_version), case=case: (
+                                _parity_cell(cells.get((*key, row["datatype"], case)))
+                            ),
+                        )
+                        for case in cases
+                    ),
+                ],
+            )
     # each distinct error once per writer, e.g. a missing PARQUET_JAVA_CLASSPATH
     errors: dict[tuple[str, str], list[str]] = {}
     for result in results:
         if result.error is not None:
             line = result.error.strip().splitlines()[0]
-            cell = f"{result.case} {result.datatype}"
+            cell = f"{result.page_version} {result.case} {result.datatype}"
             errors.setdefault((result.writer, line), []).append(cell)
     for (writer, line), failed in errors.items():
         where = failed[0] if len(failed) == 1 else f"{len(failed)} cells"

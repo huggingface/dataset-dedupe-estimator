@@ -287,8 +287,8 @@ class TestContentDefinedChunking:
     def test_pages_match_parquet_cpp(self, tmp_path, writer, table, row_group_size):
         """Every writer writes the same data pages as parquet-cpp, byte for byte.
 
-        Only the payloads are compared: the headers carry each writer's statistics,
-        and the files are uncompressed as the writers' codecs differ (e.g. snappy).
+        Only the payloads are compared: the headers differ (see de.parity), and the
+        files are uncompressed as the writers' codecs differ (e.g. snappy).
         """
         cpp, layout = (
             Layout.read(

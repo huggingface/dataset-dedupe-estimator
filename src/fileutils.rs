@@ -1,7 +1,7 @@
 use arrow_array::RecordBatchReader;
 use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
 use parquet::basic::{Compression, GzipLevel, ZstdLevel};
-use parquet::file::properties::{CdcOptions, WriterProperties};
+use parquet::file::properties::{CdcOptions, WriterProperties, WriterVersion};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::fs::File;
@@ -26,6 +26,8 @@ pub(crate) struct WriterOptions {
     row_group_size: Option<usize>,
     data_page_size: Option<usize>,
     max_rows_per_page: Option<usize>,
+    /// "1.0" or "2.0", the writer version with v2 data pages and their encodings.
+    data_page_version: String,
     /// `None` writes all rows with a single `ArrowWriter::write` call.
     batch_size: Option<usize>,
 }
@@ -58,7 +60,17 @@ fn build_writer_properties(options: &WriterOptions) -> PyResult<WriterProperties
             norm_level,
         }),
     };
+    let writer_version = match options.data_page_version.as_str() {
+        "1.0" => WriterVersion::PARQUET_1_0,
+        "2.0" => WriterVersion::PARQUET_2_0,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "Unknown data page version: {other}"
+            )))
+        }
+    };
     let mut builder = WriterProperties::builder()
+        .set_writer_version(writer_version)
         .set_dictionary_enabled(options.use_dictionary)
         .set_content_defined_chunking(cdc);
     if let Some(c) = &options.compression {

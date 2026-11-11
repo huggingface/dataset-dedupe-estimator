@@ -113,6 +113,18 @@ class TestParquetCpp:
         dest = ParquetCpp(use_cdc=False, row_group_size=20).write("dst", src, tmp_path)
         assert pq.read_metadata(dest).num_row_groups == 5
 
+    def test_statistics_are_in_the_page_index(self, tmp_path, table):
+        cpp, rs = (
+            fmt(use_cdc=False).write(fmt.name, table, tmp_path)
+            for fmt in (ParquetCpp, ParquetRs)
+        )
+        assert pq.read_metadata(cpp).row_group(0).column(0).has_column_index
+        # no statistics in the page headers, so the pages are parquet-rs's, headers
+        # included
+        assert [p["page_hash"] for p in Layout.read(cpp).pages] == [
+            p["page_hash"] for p in Layout.read(rs).pages
+        ]
+
 
 class TestParquetRs:
     def test_paramstem_with_row_group_size(self):
@@ -160,10 +172,11 @@ class TestParquet:
             row_group_size=2**16,
             data_page_size=2**30,
             max_rows_per_page=20480,
+            data_page_version="2.0",
             batch_size=100_000,
         )
         assert fmt.paramstem == (
-            "snappy cdc=8Ki-32Ki-n0 nodict rg=64Ki dp=1Gi rpp=20Ki stream=100000"
+            "snappy cdc=8Ki-32Ki-n0 nodict rg=64Ki dp=1Gi rpp=20Ki v2 stream=100000"
         )
 
     def test_paramstem_sizes_are_exact(self):
@@ -191,6 +204,12 @@ class TestParquet:
         fmt = ParquetDuckDB(use_cdc=False, max_rows_per_page=NO_LIMIT)
         assert fmt.paramstem == "rpp=1Gi"
 
+    def test_data_page_versions(self):
+        with pytest.raises(ValueError, match="no v2 data pages"):
+            ParquetDuckDB(use_cdc=False, data_page_version="2.0")
+        with pytest.raises(ValueError, match="unknown data page version"):
+            ParquetCpp(use_cdc=False, data_page_version="3.0")
+
     def test_every_field_changes_paramstem(self):
         changed = {
             "use_cdc": True,
@@ -199,6 +218,7 @@ class TestParquet:
             "row_group_size": 10,
             "data_page_size": 1024,
             "max_rows_per_page": 10,
+            "data_page_version": "2.0",
             "batch_size": 10,
         }
         assert {f.name for f in fields(Parquet)} == changed.keys()
@@ -231,6 +251,33 @@ class TestParquet:
         from_table = fmt.write("table", data, tmp_path)
         from_path = fmt.write("path", src, tmp_path)
         assert from_table.read_bytes() == from_path.read_bytes()
+
+    def test_v2_pages_with_writer_version_2_encodings(self, tmp_path):
+        schema = {
+            "a": "int",
+            "b": "str",
+            "c": ["int"],
+            "d": {"x": "float"},
+            "e": "bool",
+        }
+        data = DataGenerator(schema).generate_table(1000)
+        cpp, rs = (
+            Layout.read(
+                fmt(use_cdc=CDC, use_dictionary=False, data_page_version="2.0").write(
+                    fmt.name, data, tmp_path
+                )
+            )
+            for fmt in (ParquetCpp, ParquetRs)
+        )
+        # parquet-cpp is told to delta encode integers and strings like parquet-rs
+        assert {(p["path"], p["page_type"], p["encoding"]) for p in cpp.pages} == {
+            ("a", "data_page_v2", "delta_binary_packed"),
+            ("b", "data_page_v2", "delta_byte_array"),
+            ("c.list.element", "data_page_v2", "delta_binary_packed"),
+            ("d.x", "data_page_v2", "plain"),
+            ("e", "data_page_v2", "rle"),
+        }
+        assert [p["page_hash"] for p in cpp.pages] == [p["page_hash"] for p in rs.pages]
 
     @pytest.mark.parametrize("writer", [ParquetCpp, ParquetRs])
     @pytest.mark.parametrize("batch_size", [None, 100])
@@ -274,6 +321,28 @@ class TestParquetJava:
             "out", data, tmp_path
         )
         assert pq.read_table(path).equals(data)
+
+    def test_v2_data_pages(self, tmp_path):
+        data = pa.table({"x": list(range(100))})
+        fmt = ParquetJava(use_cdc=False, use_dictionary=False, data_page_version="2.0")
+        pages = Layout.read(fmt.write("out", data, tmp_path)).pages
+        assert [(p["page_type"], p["encoding"]) for p in pages] == [
+            ("data_page_v2", "delta_binary_packed")
+        ]
+
+    def test_page_headers_without_crc(self, tmp_path):
+        # a nested column with long level runs, which both writers encode the same
+        # way, parquet-java labels the missing repetition levels of flat ones
+        # differently
+        data = pa.table({"x": [[i] for i in range(1000)]})
+        cpp, java = (
+            fmt(use_cdc=False, use_dictionary=False).write(fmt.name, data, tmp_path)
+            for fmt in (ParquetCpp, ParquetJava)
+        )
+        # no CRC in the page headers, so the pages are parquet-cpp's, headers included
+        assert [p["page_hash"] for p in Layout.read(java).pages] == [
+            p["page_hash"] for p in Layout.read(cpp).pages
+        ]
 
 
 needs_duckdb = pytest.mark.skipif(

@@ -542,14 +542,15 @@ def parity_command(
     cdc_norm_level,
     max_workers,
 ):
-    """Compare the pages of every writer to parquet-cpp's, per datatype and case.
+    """Compare the pages of every writer to parquet-cpp's, per data page version,
+    datatype and case.
 
     The files are kept in DIRECTORY, compare a cell's pages with page-diff:
 
     \b
     de parity runs/parity --writer parquet-rs --writer parquet-java --writer duckdb
-    de page-diff runs/parity/plain/parquet-cpp/list-int-*.parquet \\
-        runs/parity/plain/parquet-java/list-int-*.parquet
+    de page-diff runs/parity/v1/plain/parquet-cpp/list-int-*.parquet \\
+        runs/parity/v1/plain/parquet-java/list-int-*.parquet
     """
     cdc = CdcParams(
         min_chunk_size=cdc_min_size * 1024,

@@ -184,18 +184,66 @@ Show the exact pages of a file, or compare the pages of two files:
     runs/stock/cut/parquet-rs/original-snappy-cdc-256Ki-1Mi-n0-nodict-rg-64Ki-dp-1Gi-rpp-1Gi.parquet
 ```
 
+## Parity
+
 Check where the writers write exactly the same pages as parquet-cpp: every writer
 writes a table per datatype with the settings of each case (PLAIN in a single row
-group, row groups, a row or size limit per page, dictionary, snappy and zstd). A
-cell is identical, has cuts in only one of the files, or has pages with the same
-cuts but different bytes (headers aside). The files are kept to inspect any cell
-with `de page-diff`:
+group, row groups, a row or size limit per page, dictionary, snappy and zstd), with
+both v1 and v2 data pages. A cell is identical, has cuts in only one of the files,
+or has pages with the same cuts but different bytes (headers aside). The files are
+kept to inspect any cell with `de page-diff`:
 
 ```bash
 ❯ de parity runs/parity --writer parquet-rs --writer parquet-java --writer duckdb
-❯ de page-diff runs/parity/plain/parquet-cpp/list-int-*.parquet runs/parity/plain/parquet-java/list-int-*.parquet
+❯ de page-diff runs/parity/v1/plain/parquet-cpp/list-int-*.parquet runs/parity/v1/plain/parquet-java/list-int-*.parquet
 ```
 
+With v2 data pages every writer uses the encodings of writer version 2.0, the only
+ones parquet-java writes v2 pages with: values that aren't dictionary encoded are
+delta encoded if they are integers or byte arrays, parquet-cpp is told so per
+column. DuckDB writes no v2 data pages, its `PARQUET_VERSION V2` only changes the
+encodings.
+
+The parquet spec says nothing about content defined chunking, nor about writers
+writing the same bytes, so the known differences in the payloads are all valid
+parquet:
+
+| Difference | Writer | Cause |
+|---|---|---|
+| Level encoding | parquet-java | Runs of fewer than 8 repeated levels are bit-packed where parquet-cpp writes RLE runs, the decoded levels are the same. Mostly in nested columns. |
+| Dictionary | parquet-java | Falls back to PLAIN (delta with v2 pages) for the whole column chunk unless the dictionary and the indices of its first page are smaller than PLAIN. parquet-cpp keeps the dictionary until the dictionary page reaches 1 MiB. |
+| Dictionary, v2 | parquet-rs | Falls back to delta encodings, parquet-cpp to PLAIN as pyarrow can't combine `column_encoding` with dictionary encoding. |
+| Delta encoding, v2 | parquet-java | DELTA_BINARY_PACKED blocks of 128 INT64 values instead of 256, and stale bits instead of zeros in the padding and the bit widths of unused miniblocks in the last block. Every integer and string page differs. |
+| Snappy | parquet-java, parquet-rs | Different libraries, the decompressed pages are the same: snappy-java 1.1.10 and the pure Rust `snap` crate. |
+| Zstd | parquet-java | Level 3 instead of 1, the streaming API (no content size in the frame header) and a flush before closing (an empty last block). |
+| Compression, v2 | parquet-java, parquet-rs | v2 pages compress the values only. parquet-cpp leaves them uncompressed unless that makes them smaller, parquet-rs unless they get smaller than the levels and values together, parquet-java always compresses them. |
+
+The page headers aren't compared, they differ too:
+
+| Header field | parquet-cpp | parquet-rs | parquet-java |
+|---|---|---|---|
+| Statistics | In every data page header unless a page index is written, so `de` writes one | None | None |
+| CRC | None | None | By default, `de` turns it off |
+| Repetition level encoding of flat columns, v1 | RLE | RLE | BIT_PACKED |
+| Dictionary encodings, v1 | PLAIN, RLE_DICTIONARY | PLAIN, RLE_DICTIONARY | PLAIN_DICTIONARY |
+| `is_compressed`, v2 | Whether the values are compressed | Whether the values are compressed | Always true, even uncompressed |
+
+Deduplication across writers needs the same bytes, headers included: xet chunks
+(64 KiB on average) span several pages, so a single different header byte makes a
+chunk new. The xet dedup ratio of the parity tables written by parquet-cpp (pyarrow
+26.0.1) and another writer, 0.5 is complete deduplication and 1.0 none:
+
+| Writer | Pages | plain | row-groups | row-limit | size-limit | dictionary | snappy | zstd |
+|---|---|---|---|---|---|---|---|---|
+| parquet-rs 58.4.0 | v1 | 0.515 | 0.625 | 0.518 | 0.988 | 0.518 | 0.565 | 0.523 |
+| parquet-rs 58.4.0 | v2 | 0.516 | 0.599 | 0.519 | 0.996 | 0.930 | 0.685 | 0.553 |
+| parquet-java 1.19.0-SNAPSHOT | v1 | 0.913 | 0.918 | 0.913 | 0.998 | 0.939 | 0.948 | 0.999 |
+| parquet-java 1.19.0-SNAPSHOT | v2 | 0.996 | 0.996 | 0.996 | 0.998 | 1.000 | 0.997 | 1.000 |
+
+parquet-rs writes parquet-cpp's bytes with both page versions, except for its wrong
+cuts of nested columns after the first row group and its empty pages at a size
+limit. parquet-java writes them only with v1 pages of nested columns where the level
+encoding agrees.
 
 # Results on Synthetic Data
 

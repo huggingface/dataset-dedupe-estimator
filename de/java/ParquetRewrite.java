@@ -3,8 +3,9 @@
 // usage: java -cp <parquet-hadoop classpath> ParquetRewrite.java SRC DEST [KEY=VALUE...]
 //
 // The options mirror de.formats.Parquet: use_cdc=false|true|MIN,MAX,NORM,
-// compression, use_dictionary, row_group_size (rows), data_page_size (bytes) and
-// max_rows_per_page. Options left out keep the parquet-java defaults.
+// compression, use_dictionary, row_group_size (rows), data_page_size (bytes),
+// max_rows_per_page and data_page_version=1.0|2.0 (the writer version). Options left
+// out keep the parquet-java defaults.
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -12,6 +13,7 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.fs.RawLocalFileSystem;
 import org.apache.parquet.column.ContentDefinedChunkingOptions;
+import org.apache.parquet.column.ParquetProperties.WriterVersion;
 import org.apache.parquet.example.data.Group;
 import org.apache.parquet.hadoop.ParquetFileReader;
 import org.apache.parquet.hadoop.ParquetFileWriter;
@@ -46,7 +48,10 @@ public class ParquetRewrite {
         .withType(schema)
         .withWriteMode(ParquetFileWriter.Mode.OVERWRITE)
         // no padding between row groups, it would only add bytes depending on the layout
-        .withMaxPaddingSize(0);
+        .withMaxPaddingSize(0)
+        // no CRC in the page headers, like parquet-cpp and parquet-rs, so the same
+        // pages can have the same bytes
+        .withPageWriteChecksumEnabled(false);
     for (Map.Entry<String, String> option : options.entrySet()) {
       String value = option.getValue();
       switch (option.getKey()) {
@@ -81,6 +86,18 @@ public class ParquetRewrite {
           break;
         case "max_rows_per_page":
           builder.withPageRowCountLimit(Integer.parseInt(value));
+          break;
+        case "data_page_version":
+          switch (value) {
+            case "1.0":
+              builder.withWriterVersion(WriterVersion.PARQUET_1_0);
+              break;
+            case "2.0":
+              builder.withWriterVersion(WriterVersion.PARQUET_2_0);
+              break;
+            default:
+              throw new IllegalArgumentException("unknown data page version: " + value);
+          }
           break;
         default:
           throw new IllegalArgumentException("unknown option: " + option.getKey());

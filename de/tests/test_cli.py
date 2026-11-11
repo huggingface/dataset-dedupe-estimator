@@ -240,7 +240,9 @@ class TestBenchCommands:
         )
         assert result.exit_code == 0, result.output
         assert "list<struct<int>>" in result.output
-        assert (tmp_path / "plain" / "parquet-rs").is_dir()
+        assert "parquet-rs, v2 data pages" in result.output
+        assert (tmp_path / "v1" / "plain" / "parquet-rs").is_dir()
+        assert (tmp_path / "v2" / "plain" / "parquet-rs").is_dir()
 
     def test_page_chunks(self, runner, tmp_path):
         path = tmp_path / "x.parquet"
