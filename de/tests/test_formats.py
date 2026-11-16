@@ -3,6 +3,7 @@ import gzip
 import json
 import os
 import sqlite3
+import subprocess
 import tempfile
 
 import pyarrow as pa
@@ -194,6 +195,29 @@ class TestParquet:
         }
         assert len(paths) == 3
 
+    def test_write_many_returns_paths_and_errors_in_job_order(self, tmp_path, table):
+        good = ParquetRs(use_cdc=False)
+        bad = ParquetRs(use_cdc=False, compression="nonexistent")
+        results = ParquetRs.write_many(
+            [
+                (good, "a", table, tmp_path),
+                (bad, "b", table, tmp_path),
+                (good, "c", table, tmp_path),
+            ]
+        )
+        assert isinstance(results[1], ValueError)
+        assert pq.read_table(results[0]).equals(table)
+        assert pq.read_table(results[2]).equals(table)
+
+    def test_read_back_decodes_dictionaries(self, tmp_path):
+        # read back without dictionary encoding, the dictionary is rebuilt in the
+        # order the values first appear
+        indices = pa.array([2, 0, 2, 1], pa.int32())
+        data = pa.table(
+            {"d": pa.DictionaryArray.from_arrays(indices, pa.array(list("abcd")))}
+        )
+        ParquetCpp(use_cdc=False, use_dictionary=False).write("out", data, tmp_path)
+
     def test_streaming_needs_a_streaming_writer(self):
         with pytest.raises(ValueError, match="no write calls"):
             ParquetJava(use_cdc=False, batch_size=10)
@@ -343,6 +367,53 @@ class TestParquetJava:
         assert [p["page_hash"] for p in Layout.read(java).pages] == [
             p["page_hash"] for p in Layout.read(cpp).pages
         ]
+
+    def test_write_many_in_one_jvm(self, tmp_path, table, monkeypatch):
+        launched = []
+        popen = subprocess.Popen
+
+        def counting_popen(*args, **kwargs):
+            launched.append(args)
+            return popen(*args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "Popen", counting_popen)
+        fmt = ParquetJava(use_cdc=CDC)
+        results = ParquetJava.write_many(
+            [(fmt, f"t{i}", table, tmp_path) for i in range(6)], max_workers=1
+        )
+        assert len(launched) == 1
+        assert all(pq.read_table(path).equals(table) for path in results)
+
+    def test_a_failing_job_doesnt_fail_the_others(self, tmp_path, table):
+        good = ParquetJava(use_cdc=False)
+        bad = ParquetJava(use_cdc=False, compression="nonexistent")
+        results = ParquetJava.write_many(
+            [
+                (good, "a", table, tmp_path),
+                (bad, "b", table, tmp_path),
+                (good, "c", table, tmp_path),
+            ],
+            max_workers=1,
+        )
+        assert isinstance(results[1], RuntimeError)
+        assert "NONEXISTENT" in str(results[1])
+        assert pq.read_table(results[0]).equals(table)
+        assert pq.read_table(results[2]).equals(table)
+
+    def test_paths_with_spaces(self, tmp_path, table):
+        directory = tmp_path / "with space"
+        directory.mkdir()
+        fmt = ParquetJava(use_cdc=False)
+        [path] = ParquetJava.write_many([(fmt, "a b", table, directory)])
+        assert pq.read_table(path).equals(table)
+
+    def test_broken_classpath_fails_every_job(self, tmp_path, table, monkeypatch):
+        monkeypatch.setenv("PARQUET_JAVA_CLASSPATH", str(tmp_path / "nothing.jar"))
+        fmt = ParquetJava(use_cdc=False)
+        results = ParquetJava.write_many(
+            [(fmt, "a", table, tmp_path), (fmt, "b", table, tmp_path)]
+        )
+        assert all(isinstance(result, RuntimeError) for result in results)
 
 
 needs_duckdb = pytest.mark.skipif(

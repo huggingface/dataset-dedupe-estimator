@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 import os
 from pathlib import Path
@@ -7,7 +8,7 @@ import subprocess
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from typing import ClassVar, Iterable, Optional
+from typing import ClassVar, Iterable, Optional, Sequence, cast
 import tempfile
 from de.core import rewrite_to_parquet_rs
 
@@ -22,6 +23,17 @@ V2_ENCODINGS = {
     "BYTE_ARRAY": "DELTA_BYTE_ARRAY",
     "FIXED_LEN_BYTE_ARRAY": "DELTA_BYTE_ARRAY",
 }
+
+
+def decode_dictionaries(table: pa.Table) -> pa.Table:
+    """The table with its dictionary columns cast to their values."""
+    fields = [
+        field.with_type(field.type.value_type)
+        if pa.types.is_dictionary(field.type)
+        else field
+        for field in table.schema
+    ]
+    return table.cast(pa.schema(fields))
 
 
 @dataclass(frozen=True)
@@ -151,21 +163,49 @@ class Parquet(FileFormat):
         dest = self.derive_path(name, directory)
         self._write(src, dest)
         if sanity_check:
-            if isinstance(src, Path):
-                src_meta = pq.read_metadata(src)
-                dst_meta = pq.read_metadata(dest)
-                assert src_meta.num_rows == dst_meta.num_rows
-                assert (
-                    src_meta.schema.to_arrow_schema()
-                    == dst_meta.schema.to_arrow_schema()
-                )
-            else:
-                written = pq.read_table(dest)
-                assert src.equals(written), (
-                    f"{dest.name} reads back different data, "
-                    f"{written.num_rows} of {src.num_rows} rows"
-                )
+            self._check(src, dest)
         return dest
+
+    @classmethod
+    def write_many(
+        cls,
+        jobs: Sequence[tuple["Parquet", str, pa.Table, Path]],
+        max_workers: Optional[int] = None,
+    ) -> list[Path | Exception]:
+        """Write the table of each (format, name, table, directory) job, like `write`.
+
+        Returns the written path or the exception of each job, in the jobs' order.
+        """
+
+        def write(job: tuple[Parquet, str, pa.Table, Path]) -> Path | Exception:
+            fmt, name, table, directory = job
+            try:
+                return fmt.write(name, table, directory)
+            except Exception as e:
+                return e
+
+        with ThreadPoolExecutor(max_workers) as executor:
+            return list(executor.map(write, jobs))
+
+    def _check(self, src: pa.Table | Path, dest: Path) -> None:
+        """Assert that the written file holds the source's data.
+
+        Dictionaries are compared decoded: a reader rebuilds the dictionary of a
+        column written without dictionary encoding, in the order its values appear.
+        """
+        if isinstance(src, Path):
+            src_meta = pq.read_metadata(src)
+            dst_meta = pq.read_metadata(dest)
+            assert src_meta.num_rows == dst_meta.num_rows
+            assert (
+                src_meta.schema.to_arrow_schema() == dst_meta.schema.to_arrow_schema()
+            )
+        else:
+            written = pq.read_table(dest)
+            assert decode_dictionaries(src).equals(decode_dictionaries(written)), (
+                f"{dest.name} reads back different data, "
+                f"{written.num_rows} of {src.num_rows} rows"
+            )
 
     def _write(self, src: pa.Table | Path, dest: Path) -> None:
         """Rewrite the source file, a table is written to a temporary file first.
@@ -262,9 +302,55 @@ class ParquetJava(Parquet):
     streaming = False
 
     def _rewrite(self, src: Path, dest: Path) -> None:
-        classpath = os.environ.get("PARQUET_JAVA_CLASSPATH")
-        if not classpath:
-            raise RuntimeError("set PARQUET_JAVA_CLASSPATH to use parquet-java")
+        [error] = self._run([(src, dest, self._options())])
+        if error is not None:
+            raise RuntimeError(error)
+
+    @classmethod
+    def write_many(
+        cls,
+        jobs: Sequence[tuple[Parquet, str, pa.Table, Path]],
+        max_workers: Optional[int] = None,
+    ) -> list[Path | Exception]:
+        """Write the jobs like `Parquet.write_many`, with a JVM per group of jobs.
+
+        Each table is written to a temporary source file once, and the jobs are split
+        into max_workers groups (4 by default) written by parallel JVMs.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            sources: dict[int, Path] = {}
+            for _, _, table, _ in jobs:
+                if id(table) not in sources:
+                    sources[id(table)] = Path(tmp) / f"{len(sources)}.parquet"
+                    pq.write_table(table, sources[id(table)])
+            rewrites = [
+                (
+                    sources[id(table)],
+                    fmt.derive_path(name, directory),
+                    cast(ParquetJava, fmt)._options(),
+                )
+                for fmt, name, table, directory in jobs
+            ]
+            groups = max_workers or min(4, os.cpu_count() or 1)
+            size = max(1, -(-len(rewrites) // groups))
+            with ThreadPoolExecutor(groups) as executor:
+                chunks = [rewrites[i : i + size] for i in range(0, len(rewrites), size)]
+                errors = [e for chunk in executor.map(cls._run, chunks) for e in chunk]
+
+        results: list[Path | Exception] = []
+        for (fmt, _, table, _), (_, dest, _), error in zip(jobs, rewrites, errors):
+            if error is not None:
+                results.append(RuntimeError(error))
+                continue
+            try:
+                fmt._check(table, dest)
+                results.append(dest)
+            except Exception as e:
+                results.append(e)
+        return results
+
+    def _options(self) -> list[str]:
+        """The KEY=VALUE options of ParquetRewrite.java."""
         if isinstance(self.use_cdc, CdcParams):
             cdc = self.use_cdc
             use_cdc = f"{cdc.min_chunk_size},{cdc.max_chunk_size},{cdc.norm_level}"
@@ -279,17 +365,37 @@ class ParquetJava(Parquet):
             max_rows_per_page=self.max_rows_per_page,
             data_page_version=self.data_page_version,
         )
+        return [f"{key}={value}" for key, value in options.items() if value is not None]
+
+    @staticmethod
+    def _run(rewrites: list[tuple[Path, Path, list[str]]]) -> list[Optional[str]]:
+        """Run the (src, dest, options) rewrites in one JVM, the error of each or None."""
+        classpath = os.environ.get("PARQUET_JAVA_CLASSPATH")
+        if not classpath:
+            raise RuntimeError("set PARQUET_JAVA_CLASSPATH to use parquet-java")
         program = Path(__file__).parent / "java" / "ParquetRewrite.java"
+        jobs = "".join(
+            "\t".join([str(src), str(dest), *options]) + "\n"
+            for src, dest, options in rewrites
+        )
         result = subprocess.run(
             # only errors are logged, so stderr holds just the exception
             ["java", "-Dorg.slf4j.simpleLogger.defaultLogLevel=error"]
-            + ["-cp", classpath, str(program), str(src), str(dest)]
-            + [f"{key}={value}" for key, value in options.items() if value is not None],
+            + ["-cp", classpath, str(program)],
+            input=jobs,
             capture_output=True,
             text=True,
         )
-        if result.returncode:
-            raise RuntimeError(f"parquet-java failed: {result.stderr}")
+        outcomes = {}
+        for line in result.stdout.splitlines():
+            status, dest, *message = line.split("\t", 2)
+            if status in ("ok", "error"):
+                outcomes[dest] = (
+                    None if status == "ok" else f"parquet-java failed: {message[0]}"
+                )
+        # the jobs a crashed JVM didn't get to fail with its stderr
+        crashed = f"parquet-java failed: {result.stderr}"
+        return [outcomes.get(str(dest), crashed) for _, dest, _ in rewrites]
 
 
 @dataclass(frozen=True)

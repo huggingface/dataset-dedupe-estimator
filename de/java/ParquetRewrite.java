@@ -1,12 +1,19 @@
-// Rewrite a parquet file with parquet-java, used by de.formats.ParquetJava.
+// Rewrite parquet files with parquet-java, used by de.formats.ParquetJava.
 //
-// usage: java -cp <parquet-hadoop classpath> ParquetRewrite.java SRC DEST [KEY=VALUE...]
+// usage: java -cp <parquet-hadoop classpath> ParquetRewrite.java < JOBS
+//
+// Every line of JOBS is a tab separated SRC, DEST and KEY=VALUE options, and every job
+// prints a line to stdout: "ok\tDEST" or "error\tDEST\tMESSAGE". A failing job doesn't
+// stop the others, so a single JVM writes them all.
 //
 // The options mirror de.formats.Parquet: use_cdc=false|true|MIN,MAX,NORM,
 // compression, use_dictionary, row_group_size (rows), data_page_size (bytes),
 // max_rows_per_page and data_page_version=1.0|2.0 (the writer version). Options left
 // out keep the parquet-java defaults.
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.apache.hadoop.conf.Configuration;
@@ -27,14 +34,26 @@ import org.apache.parquet.schema.MessageType;
 
 public class ParquetRewrite {
   public static void main(String[] args) throws Exception {
-    Path src = new Path(args[0]);
-    Path dest = new Path(args[1]);
-    Map<String, String> options = new LinkedHashMap<>();
-    for (int i = 2; i < args.length; i++) {
-      String[] option = args[i].split("=", 2);
-      options.put(option[0], option[1]);
+    BufferedReader jobs =
+        new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8));
+    for (String line = jobs.readLine(); line != null; line = jobs.readLine()) {
+      String[] fields = line.split("\t");
+      Map<String, String> options = new LinkedHashMap<>();
+      for (int i = 2; i < fields.length; i++) {
+        String[] option = fields[i].split("=", 2);
+        options.put(option[0], option[1]);
+      }
+      try {
+        rewrite(new Path(fields[0]), new Path(fields[1]), options);
+        System.out.println("ok\t" + fields[1]);
+      } catch (Exception e) {
+        System.out.println("error\t" + fields[1] + "\t" + e.toString().replace('\n', ' '));
+      }
+      System.out.flush();
     }
+  }
 
+  static void rewrite(Path src, Path dest, Map<String, String> options) throws Exception {
     // the raw local file system doesn't write .crc files next to the output
     Configuration conf = new Configuration();
     conf.set("fs.file.impl", RawLocalFileSystem.class.getName());
