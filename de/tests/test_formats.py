@@ -155,6 +155,35 @@ class TestParquetRs:
         ParquetRs(use_cdc=True).write("out", table, tmp_path)
         assert list(tmp.iterdir()) == []
 
+    @pytest.mark.parametrize("batch_size", [None, 100])
+    def test_sliced_table_writes_the_same_bytes_as_a_copy(self, tmp_path, batch_size):
+        # flat columns: parquet-rs cuts sliced lists differently, which the CDC
+        # suite's test_sliced_table_writes_the_same_bytes reports
+        data = DataGenerator({"a": "int", "b": "str"}, null_ratio=0.1).generate_table(
+            2000
+        )
+        sliced = data.slice(512)
+        copy = sliced.take(pa.array(range(len(sliced))))
+        assert sliced.column(0).chunk(0).offset == 512
+        fmt = ParquetRs(use_cdc=CDC, use_dictionary=False, batch_size=batch_size)
+        assert (
+            fmt.write("sliced", sliced, tmp_path).read_bytes()
+            == fmt.write("copy", copy, tmp_path).read_bytes()
+        )
+
+    def test_tables_reach_the_writer_without_a_file(self, tmp_path, monkeypatch):
+        # null list entries spanning child values and dictionaries arrive unchanged
+        monkeypatch.setattr(pq, "write_table", None)
+        schema = {"a": "nullsegments", "d": "dictionary"}
+        data = DataGenerator(schema, null_ratio=0.1).generate_table(2000)
+        ParquetRs(use_cdc=CDC).write("out", data, tmp_path)
+
+    def test_chunked_table_is_one_write_call(self, tmp_path):
+        data = pa.concat_tables([pa.table({"x": list(range(70))})] * 2)
+        assert data.column(0).num_chunks == 2
+        path = ParquetRs(use_cdc=False, row_group_size=100).write("out", data, tmp_path)
+        assert row_group_sizes(path) == [100, 40]
+
 
 CDC = CdcParams(min_chunk_size=8 * 1024, max_chunk_size=32 * 1024, norm_level=0)
 

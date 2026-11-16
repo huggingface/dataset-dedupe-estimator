@@ -17,7 +17,7 @@ rayon = "1.10.0"
 xxhash-rust = { version = "0.8.15", features = ["xxh3"] }
 indicatif = { version = "*", features = ["rayon"] }
 png = "0.17.16"
-arrow-array = "58.1"
+arrow-array = { version = "58.1", features = ["ffi"] }
 parquet = { version = "58.1", default-features = false, features = [
   "arrow",
   "snap",

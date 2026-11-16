@@ -10,7 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from typing import ClassVar, Iterable, Optional, Sequence, cast
 import tempfile
-from de.core import rewrite_to_parquet_rs
+from de.core import rewrite_to_parquet_rs, write_to_parquet_rs
 
 # a page limit large enough to never cut
 NO_LIMIT = 2**30
@@ -283,10 +283,33 @@ class ParquetCpp(Parquet):
 
 @dataclass(frozen=True)
 class ParquetRs(Parquet):
+    """parquet-rs, through de's Rust extension.
+
+    Tables are handed over in-process through the Arrow C stream interface, so the
+    arrays arrive as they are: sliced, with their dictionaries, and with null list
+    entries spanning child values. Each record batch is a write call.
+    """
+
     name = "parquet-rs"
 
-    def _rewrite(self, src: Path, dest: Path) -> None:
-        rewrite_to_parquet_rs(str(src), str(dest), self)
+    def _write(self, src: pa.Table | Path, dest: Path) -> None:
+        if isinstance(src, Path):
+            rewrite_to_parquet_rs(str(src), str(dest), self)
+            return
+        if self.batch_size is None:
+            # a single write call, a single chunk keeps its slice
+            if any(column.num_chunks > 1 for column in src.columns):
+                src = src.combine_chunks()
+            batches = src.to_batches()
+        else:
+            size = self.batch_size
+            batches = [
+                batch
+                for offset in range(0, len(src), size)
+                for batch in src.slice(offset, size).combine_chunks().to_batches()
+            ]
+        reader = pa.RecordBatchReader.from_batches(src.schema, batches)
+        write_to_parquet_rs(reader, str(dest), self)
 
 
 @dataclass(frozen=True)

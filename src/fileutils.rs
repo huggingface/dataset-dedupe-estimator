@@ -1,3 +1,4 @@
+use arrow_array::ffi_stream::ArrowArrayStreamReader;
 use arrow_array::RecordBatchReader;
 use parquet::arrow::{arrow_reader::ParquetRecordBatchReaderBuilder, ArrowWriter};
 use parquet::basic::{Compression, GzipLevel, ZstdLevel};
@@ -88,20 +89,13 @@ fn build_writer_properties(options: &WriterOptions) -> PyResult<WriterProperties
     Ok(builder.build())
 }
 
-pub(crate) fn rewrite_to_parquet_rs(
-    src_path: &str,
+/// Write every batch of the reader with its own `ArrowWriter::write` call.
+fn write_batches(
+    reader: impl RecordBatchReader,
     dest_path: &str,
     options: &WriterOptions,
 ) -> PyResult<()> {
-    let input = File::open(src_path)
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to open {src_path}: {e}")))?;
-    let reader = ParquetRecordBatchReaderBuilder::try_new(input)
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create reader: {e}")))?
-        .with_batch_size(options.batch_size.unwrap_or(usize::MAX))
-        .build()
-        .map_err(|e| PyRuntimeError::new_err(format!("Failed to build reader: {e}")))?;
-    let schema = reader.schema().clone();
-
+    let schema = reader.schema();
     let output = File::create(dest_path)
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to create {dest_path}: {e}")))?;
     let props = build_writer_properties(options)?;
@@ -121,4 +115,29 @@ pub(crate) fn rewrite_to_parquet_rs(
         .map_err(|e| PyRuntimeError::new_err(format!("Failed to close writer: {e}")))?;
 
     Ok(())
+}
+
+/// Rewrite a parquet file, read in batches of `batch_size` rows.
+pub(crate) fn rewrite_to_parquet_rs(
+    src_path: &str,
+    dest_path: &str,
+    options: &WriterOptions,
+) -> PyResult<()> {
+    let input = File::open(src_path)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to open {src_path}: {e}")))?;
+    let reader = ParquetRecordBatchReaderBuilder::try_new(input)
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to create reader: {e}")))?
+        .with_batch_size(options.batch_size.unwrap_or(usize::MAX))
+        .build()
+        .map_err(|e| PyRuntimeError::new_err(format!("Failed to build reader: {e}")))?;
+    write_batches(reader, dest_path, options)
+}
+
+/// Write the batches of an Arrow C stream as they are, slices included.
+pub(crate) fn write_to_parquet_rs(
+    reader: ArrowArrayStreamReader,
+    dest_path: &str,
+    options: &WriterOptions,
+) -> PyResult<()> {
+    write_batches(reader, dest_path, options)
 }

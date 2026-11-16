@@ -1,5 +1,7 @@
+use arrow_array::ffi_stream::{ArrowArrayStreamReader, FFI_ArrowArrayStream};
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
+use pyo3::types::PyCapsule;
 use std::path::Path;
 
 mod fileutils;
@@ -8,7 +10,10 @@ mod show;
 mod store;
 mod xet;
 
-use fileutils::{rewrite_to_parquet_rs as _rewrite_to_parquet_rs, WriterOptions};
+use fileutils::{
+    rewrite_to_parquet_rs as _rewrite_to_parquet_rs, write_to_parquet_rs as _write_to_parquet_rs,
+    WriterOptions,
+};
 use pages::{read_pages, Page};
 use show::write_png;
 use store::{Chunk, ChunkStore};
@@ -69,6 +74,26 @@ fn rewrite_to_parquet_rs(
     py.allow_threads(|| _rewrite_to_parquet_rs(&src_path, &dest_path, &options))
 }
 
+/// Write the record batches of an object with `__arrow_c_stream__`, e.g. a
+/// `pa.RecordBatchReader`, with arrow-rs using the options of a `de.formats.Parquet`
+/// instance, one write call per batch.
+#[pyfunction]
+fn write_to_parquet_rs(
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    dest_path: String,
+    options: WriterOptions,
+) -> PyResult<()> {
+    let capsule = data
+        .call_method0("__arrow_c_stream__")?
+        .downcast_into::<PyCapsule>()?;
+    // takes the stream over, leaving a released one to the capsule's destructor
+    let reader =
+        unsafe { ArrowArrayStreamReader::from_raw(capsule.pointer() as *mut FFI_ArrowArrayStream) }
+            .map_err(|e| PyRuntimeError::new_err(format!("Failed to import the stream: {e}")))?;
+    py.allow_threads(|| _write_to_parquet_rs(reader, &dest_path, &options))
+}
+
 /// Pages of a parquet file in file order, decoded from the page headers.
 #[pyfunction]
 fn parquet_pages(py: Python<'_>, path: String) -> PyResult<Vec<Page>> {
@@ -88,6 +113,7 @@ fn core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(estimate, m)?)?;
     m.add_function(wrap_pyfunction!(chunks, m)?)?;
     m.add_function(wrap_pyfunction!(rewrite_to_parquet_rs, m)?)?;
+    m.add_function(wrap_pyfunction!(write_to_parquet_rs, m)?)?;
     m.add_function(wrap_pyfunction!(parquet_pages, m)?)?;
     m.add_function(wrap_pyfunction!(estimate_xet, m)?)?;
     Ok(())
