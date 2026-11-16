@@ -238,6 +238,21 @@ class TestParquet:
         assert pq.read_table(results[0]).equals(table)
         assert pq.read_table(results[2]).equals(table)
 
+    def test_write_many_returns_panics(self, tmp_path, table):
+        class Panic(BaseException):
+            """Like pyo3's PanicException, which isn't an Exception."""
+
+        class Panicking(ParquetRs):
+            def _write(self, src, dest):
+                raise Panic("RLE value encoder is not initialized")
+
+        good, bad = ParquetRs(use_cdc=False), Panicking(use_cdc=False)
+        results = ParquetRs.write_many(
+            [(bad, "a", table, tmp_path), (good, "b", table, tmp_path)]
+        )
+        assert isinstance(results[0], Panic)
+        assert pq.read_table(results[1]).equals(table)
+
     def test_read_back_decodes_dictionaries(self, tmp_path):
         # read back without dictionary encoding, the dictionary is rebuilt in the
         # order the values first appear
