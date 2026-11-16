@@ -328,10 +328,12 @@ class ParquetCpp(Parquet):
 
     @classmethod
     def _program(cls) -> Path:
-        """The built cpp/ParquetWrite.cc, built once per source and pyarrow version
-        into the temporary directory."""
+        """The built cpp/ParquetWrite.cc, built once per source and pyarrow install
+        into the temporary directory, linked to that install's libraries."""
         source = Path(__file__).parent / "cpp" / "ParquetWrite.cc"
-        digest = hashlib.sha256(source.read_bytes() + pa.__version__.encode())
+        libdirs = pa.get_library_dirs()
+        install = "\n".join([pa.__version__, pa.get_include(), *libdirs])
+        digest = hashlib.sha256(source.read_bytes() + install.encode())
         program = (
             Path(tempfile.gettempdir())
             / "de"
@@ -342,11 +344,12 @@ class ParquetCpp(Parquet):
                 return program
             program.parent.mkdir(parents=True, exist_ok=True)
             pa.create_library_symlinks()
-            [libdir] = pa.get_library_dirs()
             cxx = os.environ.get("CXX", "c++")
             building = program.with_suffix(f".{os.getpid()}.tmp")
             command = [cxx, "-std=c++20", "-O2", str(source), "-I", pa.get_include()]
-            command += ["-L", libdir, "-larrow", "-lparquet", f"-Wl,-rpath,{libdir}"]
+            for libdir in libdirs:
+                command += ["-L", libdir, f"-Wl,-rpath,{libdir}"]
+            command += ["-larrow", "-lparquet"]
             try:
                 result = subprocess.run(
                     command + ["-o", str(building)], capture_output=True, text=True
@@ -463,15 +466,17 @@ class ParquetJava(Parquet):
             "\t".join([str(src), str(dest), *options]) + "\n"
             for src, dest, options in rewrites
         )
-        result = subprocess.run(
-            # only errors are logged, so stderr holds just the exception; a bounded
-            # heap, the default is a quarter of the memory and collected lazily
-            ["java", "-Xmx512m", "-Dorg.slf4j.simpleLogger.defaultLogLevel=error"]
-            + ["-cp", classpath, str(program)],
-            input=jobs,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                # only errors are logged, so stderr holds just the exception
+                ["java", "-Dorg.slf4j.simpleLogger.defaultLogLevel=error"]
+                + ["-cp", classpath, str(program)],
+                input=jobs,
+                capture_output=True,
+                text=True,
+            )
+        except OSError as e:
+            return [f"parquet-java failed: {e}"] * len(rewrites)
         outcomes = {}
         for line in result.stdout.splitlines():
             status, dest, *message = line.split("\t", 2)

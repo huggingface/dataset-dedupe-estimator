@@ -10,6 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import de.formats
 from de.formats import (
     NO_LIMIT,
     CdcParams,
@@ -178,11 +179,22 @@ class TestParquetRs:
         data = DataGenerator(schema, null_ratio=0.1).generate_table(2000)
         ParquetRs(use_cdc=CDC).write("out", data, tmp_path)
 
-    def test_chunked_table_is_one_write_call(self, tmp_path):
+    def test_chunked_table_is_one_write_call(self, tmp_path, monkeypatch):
+        write = de.formats.write_to_parquet_rs
+        write_calls = []
+
+        def counting(reader, dest, options):
+            batches = list(reader)
+            write_calls.append(len(batches))
+            write(
+                pa.RecordBatchReader.from_batches(reader.schema, batches), dest, options
+            )
+
+        monkeypatch.setattr(de.formats, "write_to_parquet_rs", counting)
         data = pa.concat_tables([pa.table({"x": list(range(70))})] * 2)
         assert data.column(0).num_chunks == 2
-        path = ParquetRs(use_cdc=False, row_group_size=100).write("out", data, tmp_path)
-        assert row_group_sizes(path) == [100, 40]
+        ParquetRs(use_cdc=False, row_group_size=100).write("out", data, tmp_path)
+        assert write_calls == [1]
 
 
 CDC = CdcParams(min_chunk_size=8 * 1024, max_chunk_size=32 * 1024, norm_level=0)
@@ -372,6 +384,15 @@ class TestParquetCppStreaming:
         # write() checks that the file reads back as the table
         ParquetCpp(use_cdc=CDC, batch_size=100).write("out", data, tmp_path)
 
+    def test_program_follows_the_pyarrow_libraries(self, tmp_path, monkeypatch):
+        # a pyarrow built from source lists more library directories, and a program
+        # built against another pyarrow's libraries mustn't be reused
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        first = ParquetCpp._program()
+        libdirs = pa.get_library_dirs()
+        monkeypatch.setattr(pa, "get_library_dirs", lambda: [*libdirs, str(tmp_path)])
+        assert ParquetCpp._program() != first
+
     def test_missing_compiler(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CXX", str(tmp_path / "no-compiler"))
         monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
@@ -434,6 +455,20 @@ class TestParquetJava:
         assert [p["page_hash"] for p in Layout.read(java).pages] == [
             p["page_hash"] for p in Layout.read(cpp).pages
         ]
+
+    def test_compressed_pages_without_a_page_size_limit(self, tmp_path, table):
+        # parquet-java allocates a compressor buffer of the page size limit, as the
+        # benchmark's and the parity check's compressed cases write
+        fmt = ParquetJava(use_cdc=True, compression="snappy", data_page_size=NO_LIMIT)
+        assert pq.read_table(fmt.write("out", table, tmp_path)).equals(table)
+
+    def test_missing_java(self, tmp_path, table, monkeypatch):
+        monkeypatch.setenv("PATH", str(tmp_path))
+        fmt = ParquetJava(use_cdc=False)
+        results = ParquetJava.write_many(
+            [(fmt, "a", table, tmp_path), (fmt, "b", table, tmp_path)]
+        )
+        assert all(isinstance(result, RuntimeError) for result in results)
 
     def test_write_many_in_one_jvm(self, tmp_path, table, monkeypatch):
         launched = []

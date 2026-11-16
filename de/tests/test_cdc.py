@@ -520,11 +520,16 @@ class Corpus:
                 keys.append(key)
                 table = self.table(key.type, key.nulls, key.table)
                 jobs.append((fmt, key.stem, table, directory))
-        for key, result in zip(keys, writer.write_many(jobs)):
+        self._phases.add((writer, oracle))
+        try:
+            results = writer.write_many(jobs)
+        except Exception as e:
+            # a failed batch fails its keys once, instead of every test retrying it
+            results = [e] * len(jobs)
+        for key, result in zip(keys, results):
             self._written[writer, key] = result
             if isinstance(result, BaseException):
                 self._tracebacks[writer, key] = result.__traceback__
-        self._phases.add((writer, oracle))
 
 
 @pytest.fixture(scope="session")
@@ -557,24 +562,17 @@ def test_chunker_carries_over_row_groups(corpus, writer, type, nulls, setting, l
 def test_same_cuts_as_parquet_cpp_across_row_groups(
     corpus, writer, type, nulls, setting, layout
 ):
-    """The pages are parquet-cpp's with the same row group starts.
-
-    If the row group starts differ, as DuckDB rounds row groups to whole vectors,
-    the cuts are parquet-cpp's oracle cuts and the writer's row group starts: what
-    parquet-cpp writes for those starts, as it carries its chunker over.
+    """The cuts are parquet-cpp's single row group cuts and the writer's own row
+    group starts: what a carried over chunker cuts wherever the row groups start, as
+    DuckDB rounds row groups to whole vectors. parquet-cpp's own row group files
+    aren't the reference, its bugs would be blamed on the other writers.
     """
     key = Key(type, nulls, setting, layout=layout)
     result = corpus.layout(writer, key)
-    cpp = corpus.layout(ParquetCpp, key)
-    columns = result.columns
-    starts = [result.row_group_starts(c) for c in columns]
-    if starts == [cpp.row_group_starts(c) for c in columns]:
-        assert [result.spans(c) for c in columns] == [cpp.spans(c) for c in columns]
-    else:
-        cpp_oracle = corpus.layout(ParquetCpp, replace(key, layout="oracle"))
-        assert persistence(result, cpp_oracle) == [
-            Persistence(column=c, **PERFECT) for c in columns
-        ]
+    cpp_oracle = corpus.layout(ParquetCpp, replace(key, layout="oracle"))
+    assert persistence(result, cpp_oracle) == [
+        Persistence(column=c, **PERFECT) for c in result.columns
+    ]
 
 
 @pytest.mark.parametrize("setting", [s for s in SETTINGS if s != "v1"])
@@ -727,13 +725,19 @@ def test_chunk_sizes(corpus, writer, type, nulls):
     """Every page but the last holds between the minimum and maximum chunk size of
     hashed bytes. The level a cut happens at is hashed into the chunk before it, so
     a page from s to e was counted over [s + 1, e + 1), and over [0, e + 1) the
-    first one."""
+    first one.
+
+    The chunking is content defined: the gear hash cuts every page of the varied
+    columns before the maximum size could, only the zeros reach it.
+    """
     hashed = corpus.hashed_bytes(type, nulls)
     *pages, _ = corpus.layout(writer, Key(type, nulls)).spans(0)
     for i, span in enumerate(pages):
         counted = span.start if i == 0 else span.start + 1
         assert CDC.min_chunk_size <= hashed[span.end + 1] - hashed[counted]
         assert hashed[span.end] - hashed[counted] < CDC.max_chunk_size
+        if type not in ("zeros", "all-null"):
+            assert hashed[span.end + 1] - hashed[counted] < CDC.max_chunk_size
 
 
 @pytest.mark.parametrize("type, nulls", sorted(CONSTANT))
