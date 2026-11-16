@@ -7,6 +7,7 @@ columns levels are the coordinate shared by every writer (pages may split record
 
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from functools import cached_property
 from pathlib import Path
 from typing import Optional
@@ -137,6 +138,57 @@ def compare(left: Layout, right: Layout) -> list[PageDiff]:
             )
         )
     return diffs
+
+
+@dataclass(frozen=True)
+class Change:
+    """A run of data pages of one column that differs between a base and an edited file.
+
+    Level ranges are [start, end) of the run's pages in each file, an empty range on
+    one side means pages were only added or only removed there.
+    """
+
+    column: int
+    base: tuple[int, int]
+    edited: tuple[int, int]
+    removed: int
+    added: int
+
+    @property
+    def delta(self) -> int:
+        """Levels of the edited pages minus the levels of the base pages."""
+        return (self.edited[1] - self.edited[0]) - (self.base[1] - self.base[0])
+
+
+def changes(base: Layout, edited: Layout, column: int) -> list[Change]:
+    """The runs of data pages that differ between two files, matched by payload."""
+
+    def payloads(layout: Layout) -> list[str]:
+        return [
+            page["payload_hash"]
+            for page in layout.column_pages(column)
+            if page["page_type"] != "dictionary"
+        ]
+
+    def levels(spans: list[Span], start: int, end: int) -> tuple[int, int]:
+        if start < end:
+            return spans[start].start, spans[end - 1].end
+        position = spans[start].start if start < len(spans) else spans[-1].end
+        return position, position
+
+    base_spans, edited_spans = base.spans(column), edited.spans(column)
+    matcher = SequenceMatcher(None, payloads(base), payloads(edited), autojunk=False)
+    return [
+        Change(
+            column=column,
+            base=levels(base_spans, i1, i2),
+            edited=levels(edited_spans, j1, j2),
+            removed=i2 - i1,
+            added=j2 - j1,
+        )
+        for tag, i1, i2, j1, j2 in matcher.get_opcodes()
+        if tag != "equal"
+    ]
 
 
 @dataclass(frozen=True)

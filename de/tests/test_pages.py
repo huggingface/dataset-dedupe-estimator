@@ -5,7 +5,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from de.formats import CdcParams, ParquetCpp, ParquetDuckDB, ParquetJava, ParquetRs
-from de.pages import Layout, Persistence, compare, persistence
+from de.pages import Change, Layout, Persistence, changes, compare, persistence
 from de.synthetic import DataGenerator, evenly_spaced
 
 CDC = CdcParams(min_chunk_size=8 * 1024, max_chunk_size=32 * 1024, norm_level=0)
@@ -216,6 +216,91 @@ class TestCompare:
         diffs = compare(Layout.read(left), Layout.read(right))
         assert [diff.left_pages for diff in diffs] == [1, 0]
         assert diffs[1].new_bytes == diffs[1].right_bytes
+
+
+def layout_with_payloads(*row_groups):
+    """Single column layout from the (num_values, payload) data pages of each row group."""
+    return Layout(
+        [
+            {
+                "column": 0,
+                "row_group": row_group,
+                "page_type": "data_page_v1",
+                "num_values": num_values,
+                "payload_hash": payload,
+            }
+            for row_group, pages in enumerate(row_groups)
+            for num_values, payload in pages
+        ]
+    )
+
+
+BASE = [(10, "a"), (10, "b"), (10, "c"), (10, "d"), (10, "e")]
+
+
+class TestChanges:
+    def test_identical(self):
+        assert changes(layout_with_payloads(BASE), layout_with_payloads(BASE), 0) == []
+
+    def test_insert_within_a_page(self):
+        edited = layout_with_payloads([(10, "a"), (12, "x"), *BASE[2:]])
+        [change] = changes(layout_with_payloads(BASE), edited, 0)
+        assert change == Change(0, base=(10, 20), edited=(10, 22), removed=1, added=1)
+        assert change.delta == 2
+
+    def test_delete_splitting_a_page(self):
+        edited = layout_with_payloads([(10, "a"), (3, "x"), (4, "y"), *BASE[2:]])
+        [change] = changes(layout_with_payloads(BASE), edited, 0)
+        assert (change.removed, change.added, change.delta) == (1, 2, -3)
+
+    def test_two_edits(self):
+        edited = layout_with_payloads(
+            [(10, "a"), (11, "x"), (10, "c"), (9, "y"), (10, "e")]
+        )
+        found = changes(layout_with_payloads(BASE), edited, 0)
+        assert [change.base for change in found] == [(10, 20), (30, 40)]
+
+    def test_prepend_and_append(self):
+        edited = layout_with_payloads([(13, "p"), *BASE[1:4], (12, "q")])
+        found = changes(layout_with_payloads(BASE), edited, 0)
+        # the edited file's levels after the prepended page are 3 levels later
+        assert [(c.base, c.edited) for c in found] == [
+            ((0, 10), (0, 13)),
+            ((40, 50), (43, 55)),
+        ]
+
+    def test_pure_insertion(self):
+        edited = layout_with_payloads([*BASE[:2], (3, "n"), *BASE[2:]])
+        [change] = changes(layout_with_payloads(BASE), edited, 0)
+        assert change == Change(0, base=(20, 20), edited=(20, 23), removed=0, added=1)
+
+    def test_insertion_at_the_end(self):
+        edited = layout_with_payloads([*BASE, (3, "n")])
+        [change] = changes(layout_with_payloads(BASE), edited, 0)
+        assert change == Change(0, base=(50, 50), edited=(50, 53), removed=0, added=1)
+
+    def test_dictionary_pages_are_ignored(self):
+        def with_dictionary(payload):
+            page = {
+                "column": 0,
+                "row_group": 0,
+                "page_type": "dictionary",
+                "num_values": 5,
+                "payload_hash": payload,
+            }
+            return Layout([page, *layout_with_payloads(BASE).pages])
+
+        assert changes(with_dictionary("d1"), with_dictionary("d2"), 0) == []
+
+    def test_constant_pages_change_only_at_the_end(self):
+        base = layout_with_payloads([(10, "z")] * 4 + [(5, "w")])
+        edited = layout_with_payloads([(10, "z")] * 4 + [(7, "v")])
+        [change] = changes(base, edited, 0)
+        assert (change.base, change.edited) == ((40, 45), (40, 47))
+
+    def test_row_group_boundaries_dont_split_matches(self):
+        edited = layout_with_payloads(BASE[:2], BASE[2:])
+        assert changes(layout_with_payloads(BASE), edited, 0) == []
 
 
 class TestPersistence:
