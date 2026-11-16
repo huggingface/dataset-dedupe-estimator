@@ -176,17 +176,20 @@ class Parquet(FileFormat):
         cls,
         jobs: Sequence[tuple["Parquet", str, pa.Table, Path]],
         max_workers: Optional[int] = None,
-    ) -> list[Path | Exception]:
+    ) -> list[Path | BaseException]:
         """Write the table of each (format, name, table, directory) job, like `write`.
 
-        Returns the written path or the exception of each job, in the jobs' order.
+        Returns the written path or the exception of each job, in the jobs' order. A
+        panic of the Rust extension is returned too, though it isn't an Exception.
         """
 
-        def write(job: tuple[Parquet, str, pa.Table, Path]) -> Path | Exception:
+        def write(job: tuple[Parquet, str, pa.Table, Path]) -> Path | BaseException:
             fmt, name, table, directory = job
             try:
                 return fmt.write(name, table, directory)
-            except Exception as e:
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except BaseException as e:
                 return e
 
         with ThreadPoolExecutor(max_workers) as executor:
@@ -411,7 +414,7 @@ class ParquetJava(Parquet):
         cls,
         jobs: Sequence[tuple[Parquet, str, pa.Table, Path]],
         max_workers: Optional[int] = None,
-    ) -> list[Path | Exception]:
+    ) -> list[Path | BaseException]:
         """Write the jobs like `Parquet.write_many`, with a JVM per group of jobs.
 
         Each table is written to a temporary source file once, and the jobs are split
@@ -437,7 +440,7 @@ class ParquetJava(Parquet):
                 chunks = [rewrites[i : i + size] for i in range(0, len(rewrites), size)]
                 errors = [e for chunk in executor.map(cls._run, chunks) for e in chunk]
 
-        results: list[Path | Exception] = []
+        results: list[Path | BaseException] = []
         for (fmt, _, table, _), (_, dest, _), error in zip(jobs, rewrites, errors):
             if error is not None:
                 results.append(RuntimeError(error))
@@ -461,8 +464,9 @@ class ParquetJava(Parquet):
             for src, dest, options in rewrites
         )
         result = subprocess.run(
-            # only errors are logged, so stderr holds just the exception
-            ["java", "-Dorg.slf4j.simpleLogger.defaultLogLevel=error"]
+            # only errors are logged, so stderr holds just the exception; a bounded
+            # heap, the default is a quarter of the memory and collected lazily
+            ["java", "-Xmx512m", "-Dorg.slf4j.simpleLogger.defaultLogLevel=error"]
             + ["-cp", classpath, str(program)],
             input=jobs,
             capture_output=True,

@@ -20,7 +20,9 @@ import re
 from types import TracebackType
 from typing import Any, Iterator
 
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 
@@ -104,11 +106,13 @@ CASES = [
 # the columns that never match the gear hash, only the maximum chunk size cuts them
 CONSTANT = {("zeros", "0%"), ("all-null", "0%")}
 
-# no page limits, so the pages of a single row group are the CDC chunks
+# no page limits, so the pages of a single row group are the CDC chunks: a page size
+# limit larger than any table, as parquet-java allocates a compressor buffer of it
+PAGE_LIMIT = 64 * 2**20
 BASELINE = dict(
     use_cdc=CDC,
     use_dictionary=False,
-    data_page_size=NO_LIMIT,
+    data_page_size=PAGE_LIMIT,
     max_rows_per_page=NO_LIMIT,
 )
 # settings that must not move a cut, on top of the baseline
@@ -141,6 +145,71 @@ EDITS: dict[str, tuple[str, list[float]]] = {
 }
 # about the bytes the chunker hashes per edit
 EDIT_BYTES = 256
+
+# the value bytes parquet-cpp's chunker hashes by test type, every level hashes 2 more
+# for its definition level as every generated field is nullable; binary-like values
+# hash their bytes, all-null values aren't hashed
+HASHED_WIDTH = {
+    "all-null": 0,
+    "bool": 1,
+    "int8": 1,
+    "uint8": 1,
+    "int16": 2,
+    "uint16": 2,
+    "float16": 2,
+    "int32": 4,
+    "uint32": 4,
+    "float32": 4,
+    "date32": 4,
+    "time32": 4,
+    "dictionary": 4,
+    "int64": 8,
+    "uint64": 8,
+    "float64": 8,
+    "time64": 8,
+    "timestamp": 8,
+    "duration": 8,
+    "zeros": 8,
+    "decimal128": 16,
+    "fixed": 16,
+    "decimal256": 32,
+}
+BINARY_LIKE = {"binary", "string", "largebinary", "largestring", "json"}
+# the chunk sizes are checked on flat columns, as parquet-cpp's own tests do
+NESTED = {
+    type
+    for type, spec in TYPES.items()
+    if isinstance(spec, (list, dict)) or spec == "nullsegments"
+}
+
+# parquet-cpp's ChunkSizeParameterValidation: (min, max, norm level, accepted)
+OPTION_SETS = [
+    (0, 32, 0, True),
+    (32, 64, 0, True),
+    (1, 65, 1, True),
+    (0, 128, 2, True),
+    (0, 16, 0, False),
+    (32, 48, 0, False),
+    (32, 32, 0, False),
+    (1024, 512, 0, False),
+    (16, 0, 0, False),
+    (0, 0, 0, False),
+    (1, 32, 1, False),
+    (1, 33, 1, False),
+    (0, 123, 2, False),
+    (-16, -16, 0, False),
+    (-1, 0, 0, False),
+    (0, -1, 0, False),
+]
+# the gear hash mask depends on the chunk sizes and the norm level
+PARAMETER_SIZES = [(4096, 16384), (8192, 32768), (65536, 262144)]
+PARAMETER_TYPES = ["int64", "string", "list<int>"]
+NORM_LEVELS = range(-3, 4)
+# parquet-cpp's default chunk sizes, 256KiB to 1MiB
+DEFAULT_SIZES = (256 * 1024, 1024 * 1024)
+DEFAULT_TYPES = ["int64", "string"]
+# the chunks per table of the parameters and the defaults
+CHUNKS = 25
 # (writer, type) -> why it's skipped: the writer writes the type as another parquet type
 UNSUPPORTED: dict[tuple[str, str], str] = {
     ("duckdb", "float16"): "duckdb writes float16 as FLOAT",
@@ -186,7 +255,7 @@ class Key:
         return re.sub(r"[^a-zA-Z0-9]+", "-", "_".join(fields)).strip("-")
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=256)
 def read_layout(path: Path) -> Layout:
     return Layout.read(path)
 
@@ -233,6 +302,21 @@ class Corpus:
                 if not self._constant_update(type, nulls, table):
                     yield Key(type, nulls, table=table, layout="middle-rg")
             yield Key(type, nulls, layout="row-limit")
+        for type in TYPES:
+            yield Key(type, "0%", table="empty")
+        for min_size, max_size, norm, _ in OPTION_SETS:
+            setting = f"options={min_size},{max_size},{norm}"
+            yield Key("int64", "0%", setting, table="small")
+        for type in PARAMETER_TYPES:
+            for min_size, max_size in PARAMETER_SIZES:
+                for norm in NORM_LEVELS:
+                    setting = f"cdc={min_size},{max_size},{norm}"
+                    table = f"budget={min_size},{max_size}"
+                    yield Key(type, "0%", setting, table)
+        for type in DEFAULT_TYPES:
+            yield Key(
+                type, "0%", "cdc=default", table="budget={},{}".format(*DEFAULT_SIZES)
+            )
 
     def table(self, type: str, nulls: str, name: str = "base") -> pa.Table:
         if (type, nulls, name) not in self._tables:
@@ -297,6 +381,15 @@ class Corpus:
         if name == "base":
             rows = int(BUDGET / self.bytes_per_row(type, nulls))
             return self._generator(type, nulls).generate_table(rows)
+        if name == "empty":
+            return self._generator(type, nulls).generate_table(0)
+        if name == "small":
+            return self._generator(type, nulls).generate_table(1000)
+        if name.startswith("budget="):
+            min_size, max_size = map(int, name.removeprefix("budget=").split(","))
+            budget = CHUNKS * (min_size + max_size) / 2
+            rows = int(budget / self.bytes_per_row(type, nulls))
+            return self._generator(type, nulls).generate_table(rows)
         base = self.table(type, nulls)
         generator = self._generator(type, nulls, seed=1)
         size = self.edit_size(type, nulls)
@@ -310,6 +403,21 @@ class Corpus:
         edit = generator.generate_table(size)
         pieces = [edit, base] if kind == "prepend" else [base, edit]
         return pa.concat_tables(pieces).combine_chunks()
+
+    def hashed_bytes(self, type: str, nulls: str) -> np.ndarray:
+        """The cumulative bytes parquet-cpp's chunker hashes for the base table's rows
+        of a flat type, with a leading 0."""
+        array = self.table(type, nulls).column(0).combine_chunks()
+        if isinstance(array, pa.DictionaryArray):
+            array = array.indices
+        if isinstance(array, pa.ExtensionArray):
+            array = array.storage
+        if type in BINARY_LIKE:
+            widths = pc.binary_length(array).fill_null(0).to_numpy()
+        else:
+            valid = array.is_valid().to_numpy(zero_copy_only=False)
+            widths = np.where(valid, HASHED_WIDTH[type], 0)
+        return np.concatenate([[0], np.cumsum(widths + 2)])
 
     def edit_size(self, type: str, nulls: str) -> int:
         return max(1, int(EDIT_BYTES / self.bytes_per_row(type, nulls)))
@@ -368,6 +476,11 @@ class Corpus:
     def _setting(self, key: Key) -> dict[str, Any]:
         if key.setting == "no-cdc":
             return {"use_cdc": False}
+        if key.setting == "cdc=default":
+            return {"use_cdc": True}
+        if key.setting.startswith(("options=", "cdc=")):
+            min_size, max_size, norm = map(int, key.setting.split("=")[1].split(","))
+            return {"use_cdc": CdcParams(min_size, max_size, norm)}
         return SETTINGS[key.setting]
 
     def _layout(self, key: Key) -> dict[str, Any]:
@@ -604,3 +717,94 @@ def test_page_row_limit_keeps_cdc_cuts(corpus, writer, type, nulls):
     limited = corpus.layout(writer, Key(type, nulls, layout="row-limit"))
     oracle = corpus.layout(writer, Key(type, nulls))
     assert all(r.recall == 1.0 and r.empty == 0 for r in persistence(limited, oracle))
+
+
+FLAT = [(type, nulls) for type, nulls in CASES if type not in NESTED]
+
+
+@pytest.mark.parametrize("type, nulls", FLAT)
+def test_chunk_sizes(corpus, writer, type, nulls):
+    """Every page but the last holds between the minimum and maximum chunk size of
+    hashed bytes. The level a cut happens at is hashed into the chunk before it, so
+    a page from s to e was counted over [s + 1, e + 1), and over [0, e + 1) the
+    first one."""
+    hashed = corpus.hashed_bytes(type, nulls)
+    *pages, _ = corpus.layout(writer, Key(type, nulls)).spans(0)
+    for i, span in enumerate(pages):
+        counted = span.start if i == 0 else span.start + 1
+        assert CDC.min_chunk_size <= hashed[span.end + 1] - hashed[counted]
+        assert hashed[span.end] - hashed[counted] < CDC.max_chunk_size
+
+
+@pytest.mark.parametrize("type, nulls", sorted(CONSTANT))
+def test_constant_column_cuts_at_max_size(corpus, writer, type, nulls):
+    """Only the maximum chunk size cuts: the first page one row short of it, as the
+    other pages' first row is hashed into the chunk before them."""
+    forced = -(-CDC.max_chunk_size // (2 + HASHED_WIDTH[type]))
+    spans = corpus.layout(writer, Key(type, nulls)).spans(0)
+    *pages, _ = [span.end - span.start for span in spans]
+    assert pages == [forced - 1] + [forced] * (len(pages) - 1)
+
+
+@pytest.mark.parametrize("type", TYPES)
+def test_empty_table(corpus, writer, type):
+    result = corpus.layout(writer, Key(type, "0%", table="empty"))
+    assert all(s.end == s.start for c in result.columns for s in result.spans(c))
+
+
+@pytest.mark.parametrize("offset", [512, 1024])
+@pytest.mark.parametrize("type, nulls", CASES)
+@pytest.mark.parametrize("arrow_writer", [ParquetCpp, ParquetRs], ids=lambda w: w.name)
+def test_sliced_table_writes_the_same_bytes(
+    corpus, tmp_path, arrow_writer, type, nulls, offset
+):
+    """The chunker respects the arrays' offsets: a slice writes the bytes of its copy."""
+    fmt = corpus.format(arrow_writer, Key(type, nulls))
+    sliced = corpus.table(type, nulls).slice(offset)
+    copy = sliced.take(pa.array(range(len(sliced))))
+    assert sliced.column(0).chunk(0).offset == offset
+    assert (
+        fmt.write("sliced", sliced, tmp_path).read_bytes()
+        == fmt.write("copy", copy, tmp_path).read_bytes()
+    )
+
+
+@pytest.mark.parametrize("min_size, max_size, norm, accepted", OPTION_SETS, ids=str)
+def test_options_are_validated_like_parquet_cpp(
+    corpus, writer, min_size, max_size, norm, accepted
+):
+    """parquet-cpp's ChunkSizeParameterValidation: the rejected options fail the
+    write, the accepted ones cut parquet-cpp's pages."""
+    key = Key("int64", "0%", f"options={min_size},{max_size},{norm}", table="small")
+    corpus.format(writer, key)
+    if accepted:
+        assert corpus.layout(writer, key).spans(0) == (
+            corpus.layout(ParquetCpp, key).spans(0)
+        )
+    else:
+        # a panic of the Rust extension isn't an Exception
+        with pytest.raises(BaseException):
+            corpus.layout(writer, key)
+
+
+@pytest.mark.parametrize("norm", NORM_LEVELS)
+@pytest.mark.parametrize("sizes", PARAMETER_SIZES, ids=str)
+@pytest.mark.parametrize("type", PARAMETER_TYPES)
+def test_chunking_parameters_match_parquet_cpp(corpus, writer, type, sizes, norm):
+    """The gear hash mask of the chunk sizes and norm level is parquet-cpp's."""
+    setting = "cdc={},{},{}".format(*sizes, norm)
+    key = Key(type, "0%", setting, table="budget={},{}".format(*sizes))
+    try:
+        cpp = corpus.layout(ParquetCpp, key)
+    except Exception as e:
+        pytest.skip(f"parquet-cpp rejects it: {e}")
+    assert corpus.layout(writer, key).spans(0) == cpp.spans(0)
+
+
+@pytest.mark.parametrize("type", DEFAULT_TYPES)
+def test_default_options_match_parquet_cpp(corpus, writer, type):
+    """Every writer's default chunking options are parquet-cpp's."""
+    key = Key(type, "0%", "cdc=default", table="budget={},{}".format(*DEFAULT_SIZES))
+    assert corpus.layout(writer, key).spans(0) == (
+        corpus.layout(ParquetCpp, key).spans(0)
+    )

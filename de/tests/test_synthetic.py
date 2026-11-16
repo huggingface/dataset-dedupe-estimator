@@ -172,6 +172,12 @@ class TestNewTypes:
         assert data.type == arrow_type
         assert len(data) == 100
 
+    @pytest.mark.parametrize("dtype, arrow_type", NEW_TYPES)
+    def test_empty(self, dtype, arrow_type):
+        data = generate_array(np.random.default_rng(0), dtype, 0)
+        assert data.type == arrow_type
+        assert len(data) == 0
+
     def test_all_nulls(self):
         assert generate_array(np.random.default_rng(0), "nulls", 100).null_count == 100
 

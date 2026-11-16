@@ -250,7 +250,7 @@ def generate_values(rng, dtype, num_samples):
         return pa.DictionaryArray.from_arrays(pa.array(indices), DICTIONARY)
     elif dtype == "json":
         values = rng.integers(0, 1_000_000, size=num_samples)
-        storage = pa.array([f'{{"v": {v}}}' for v in values])
+        storage = pa.array([f'{{"v": {v}}}' for v in values], pa.string())
         return pa.ExtensionArray.from_storage(pa.json_(), storage)
     elif dtype in ("int", int):
         return pa.array(rng.integers(0, 1_000_000, size=num_samples))
