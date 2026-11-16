@@ -113,8 +113,11 @@ It also generates a plot comparing the results:
 ## Benchmark Parquet Writers
 
 Measure whether the parquet writers keep their content defined chunking state
-across row groups, for both writing a whole table with a single call
-(`pq.write_table`) and streaming it in batches (`pq.ParquetWriter`):
+across row groups, for both writing a whole table with a single call and
+streaming it in batches, write calls inside the row groups. pyarrow's
+`ParquetWriter` ends a row group at every write call, so parquet-cpp streams
+through `de/cpp/ParquetWrite.cc`, built against pyarrow's own libraries with the
+C++ compiler at `CXX` (`c++` by default) on first use:
 
 ```bash
 ❯ de bench runs/stock

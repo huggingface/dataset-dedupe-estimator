@@ -283,7 +283,7 @@ class TestParquet:
         ("writer", "batch_size", "expected"),
         [
             (ParquetCpp, None, [30, 30, 30, 10]),
-            (ParquetCpp, 25, [25, 25, 25, 25]),
+            (ParquetCpp, 25, [30, 30, 30, 10]),
             (ParquetRs, None, [30, 30, 30, 10]),
             (ParquetRs, 25, [30, 30, 30, 10]),
         ],
@@ -340,6 +340,29 @@ class TestParquet:
         fmt = writer(use_cdc=CDC, use_dictionary=False, batch_size=batch_size)
         path = fmt.write("out", data, tmp_path)
         assert pq.read_table(path).equals(data)
+
+
+class TestParquetCppStreaming:
+    def test_write_calls_stay_inside_row_groups(self, tmp_path):
+        data = DataGenerator({"a": "int"}).generate_table(100_000)
+        single = ParquetCpp(use_cdc=CDC, use_dictionary=False, row_group_size=30_011)
+        streamed = replace(single, batch_size=7_001)
+        assert Layout.read(single.write("single", data, tmp_path)).spans(0) == (
+            Layout.read(streamed.write("streamed", data, tmp_path)).spans(0)
+        )
+
+    def test_arrow_only_types_read_back(self, tmp_path):
+        schema = {"s": "largestring", "d": "dictionary", "b": "largebinary"}
+        data = DataGenerator(schema).generate_table(1000)
+        # write() checks that the file reads back as the table
+        ParquetCpp(use_cdc=CDC, batch_size=100).write("out", data, tmp_path)
+
+    def test_missing_compiler(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CXX", str(tmp_path / "no-compiler"))
+        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+        fmt = ParquetCpp(use_cdc=False, batch_size=10)
+        with pytest.raises(RuntimeError, match="no-compiler"):
+            fmt.write("out", pa.table({"x": [1]}), tmp_path)
 
 
 needs_java = pytest.mark.skipif(

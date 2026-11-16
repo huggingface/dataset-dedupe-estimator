@@ -23,7 +23,7 @@ class Failing(ParquetRs):
     page_row_limit = False
     data_page_v2 = False
 
-    def _rewrite(self, src, dest):
+    def _write(self, src, dest):
         raise RuntimeError(ERROR)
 
 
