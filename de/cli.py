@@ -6,6 +6,7 @@ import click
 import pyarrow.parquet as pq
 
 from humanize import naturalsize
+from rich.console import Console
 import plotly.io as pio
 import plotly.graph_objects as go
 
@@ -23,7 +24,7 @@ from .bench import (
 from .estimate import estimate
 from .fileutils import checkout_file_revisions
 from .pages import Layout, compare
-from .parity import parity
+from .parity import ParityCheck
 from .formats import FileFormat, ParquetCpp, ParquetRs, JsonLines, Sqlite, CdcParams
 from .estimate import compare_formats_tables, compare_formats
 from .synthetic import DataGenerator, evenly_spaced
@@ -501,7 +502,7 @@ def bench(
         sanity_check=not no_sanity_check,
         max_workers=max_workers,
     )
-    display.print_report(compare_runs([run_dir]))
+    display.print_report(compare_runs([run_dir]), Console())
 
 
 @cli.command("compare")
@@ -513,7 +514,7 @@ def bench(
 )
 def compare_command(run_dirs):
     """Compare saved benchmark runs, the first run is the baseline."""
-    display.print_report(compare_runs(list(run_dirs)))
+    display.print_report(compare_runs(list(run_dirs)), Console())
 
 
 @cli.command("parity")
@@ -557,17 +558,16 @@ def parity_command(
         max_chunk_size=cdc_max_size * 1024,
         norm_level=cdc_norm_level,
     )
-    report = parity(
-        directory, [WRITERS[name] for name in writers], num_rows, cdc, max_workers
-    )
-    display.print_parity(report)
+    check = ParityCheck(directory, [WRITERS[name] for name in writers], num_rows, cdc)
+    report = check.run(max_workers)
+    display.print_parity(report, Console())
 
 
 @cli.command()
 @click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 def pages(file):
     """Show the exact page layout of a parquet file."""
-    display.print_pages(Layout.read(file))
+    display.print_pages(Layout.read(file), Console())
 
 
 @cli.command("page-diff")
@@ -575,4 +575,5 @@ def pages(file):
 @click.argument("right", type=click.Path(exists=True, dir_okay=False, path_type=Path))
 def page_diff(left, right):
     """Compare the page boundaries and page bytes of two parquet files."""
-    display.print_page_diffs(compare(Layout.read(left), Layout.read(right)))
+    diffs = compare(Layout.read(left), Layout.read(right))
+    display.print_page_diffs(diffs, Console())

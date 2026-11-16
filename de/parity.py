@@ -59,9 +59,10 @@ parquet-java only with v1 pages of nested columns where the level encoding agree
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from functools import cached_property
 from pathlib import Path
 import re
-from typing import Any, Optional
+from typing import Any, Iterator, NamedTuple, Optional
 
 import pyarrow.parquet as pq
 from tqdm import tqdm
@@ -108,16 +109,23 @@ CASES: dict[str, dict[str, Any]] = {
 PAGE_VERSIONS = {"v1": "1.0", "v2": "2.0"}
 
 
-@dataclass(frozen=True)
-class Parity:
-    """A writer's pages of a datatype, case and page version against parquet-cpp's.
-
-    Parity means no different cuts and no different pages.
-    """
+class Cell(NamedTuple):
+    """A table every writer writes: a datatype with the settings of a page version and
+    a case."""
 
     page_version: str
     case: str
     datatype: str
+
+
+@dataclass(frozen=True)
+class Parity:
+    """A writer's pages of a cell against parquet-cpp's.
+
+    Parity means no different cuts and no different pages.
+    """
+
+    cell: Cell
     writer: str
     # the dictionary and data pages of the file with more pages
     pages: int
@@ -131,106 +139,164 @@ class Parity:
     # why the writer or parquet-cpp failed, e.g. a file that can't be read back
     error: Optional[str]
 
+    @classmethod
+    def compare(
+        cls, cell: Cell, writer: str, reference: Layout, layout: Layout
+    ) -> "Parity":
+        """Diff the writer's pages of every column with parquet-cpp's."""
+        pages = different_cuts = different_pages = empty_pages = 0
+        for column in reference.columns:
+            cuts = set(reference.cuts(column)) ^ set(layout.cuts(column))
+            different_cuts += len(cuts)
+            empty_pages += layout.empty_pages(column)
+            expected, actual = (
+                [
+                    (p["row_group"], p["num_values"], p["payload_hash"])
+                    for p in side.column_pages(column)
+                ]
+                for side in (reference, layout)
+            )
+            # a diff, so an extra or a missing page doesn't shift the rest
+            matcher = SequenceMatcher(None, expected, actual, autojunk=False)
+            longer = max(len(expected), len(actual))
+            pages += longer
+            different_pages += longer - sum(
+                block.size for block in matcher.get_matching_blocks()
+            )
+        return cls(
+            cell, writer, pages, different_cuts, different_pages, empty_pages, None
+        )
 
-def parity(
-    directory: Path,
-    writers: list[type[Parquet]],
-    num_rows: int,
-    cdc: CdcParams,
-    max_workers: Optional[int] = None,
-) -> dict:
-    """Write every datatype with every case, page version and writer, compare them
-    to parquet-cpp.
+    @classmethod
+    def failed(
+        cls, cell: Cell, writer: str, error: BaseException, prefix: str = ""
+    ) -> "Parity":
+        """A writer's parity that can't be told, as the writer or parquet-cpp failed."""
+        message = f"{prefix}{type(error).__name__}: {error}"
+        return cls(cell, writer, 0, 0, 0, 0, message)
+
+
+@dataclass(frozen=True)
+class ParityReport:
+    """The parity of every writer per cell."""
+
+    # the created_by of each writer's files, parquet-cpp's included
+    created_by: dict[str, str]
+    results: list[Parity]
+
+    @property
+    def writers(self) -> list[str]:
+        return list(dict.fromkeys(result.writer for result in self.results))
+
+    @cached_property
+    def _results(self) -> dict[tuple[str, Cell], Parity]:
+        return {(result.writer, result.cell): result for result in self.results}
+
+    def get(
+        self, writer: str, page_version: str, case: str, datatype: str
+    ) -> Optional[Parity]:
+        """A writer's parity of a cell, None if the writer can't express the case."""
+        return self._results.get((writer, Cell(page_version, case, datatype)))
+
+    def errors(self) -> dict[tuple[str, str], list[Parity]]:
+        """The failed results per writer and the first line of their error.
+
+        A writer usually fails many cells the same way, e.g. without
+        PARQUET_JAVA_CLASSPATH.
+        """
+        errors: dict[tuple[str, str], list[Parity]] = {}
+        for result in self.results:
+            if result.error is not None:
+                line = result.error.strip().splitlines()[0]
+                errors.setdefault((result.writer, line), []).append(result)
+        return errors
+
+
+class ParityCheck:
+    """Writes every datatype with every page version, case and writer, and compares
+    each writer's pages with parquet-cpp's.
 
     The files are kept at directory/page_version/case/writer/datatype-params.parquet.
-    Cases a writer can't express (e.g. duckdb has no row limit per page) are left
-    out. Returns the results and the created_by of each writer.
     """
-    assert num_rows <= MAX_ROW_GROUP_SIZE, "plain needs a single row group"
-    tables = {
-        datatype: DataGenerator({"x": spec}).generate_table(num_rows)
-        for datatype, spec in DATATYPES.items()
-    }
-    # parquet-cpp is written once, as the reference
-    unique: list[type[Parquet]] = list(dict.fromkeys([ParquetCpp, *writers]))
-    # the written file of each writer per (page version, case, datatype)
-    futures: dict[tuple[str, str, str], dict[str, Future[Path]]] = {}
-    with ThreadPoolExecutor(max_workers) as executor:
+
+    def __init__(
+        self,
+        directory: Path,
+        writers: list[type[Parquet]],
+        num_rows: int,
+        cdc: CdcParams,
+    ):
+        assert num_rows <= MAX_ROW_GROUP_SIZE, "plain needs a single row group"
+        self.directory = directory
+        # parquet-cpp is written once, as the reference
+        self.writers: list[type[Parquet]] = list(dict.fromkeys([ParquetCpp, *writers]))
+        self.num_rows = num_rows
+        self.cdc = cdc
+
+    def formats(self) -> Iterator[tuple[str, str, Parquet]]:
+        """Each writer's format of every page version and case, except the cases a
+        writer can't express (e.g. duckdb has no row limit per page)."""
         for page_version, data_page_version in PAGE_VERSIONS.items():
             for case, params in CASES.items():
-                for writer in unique:
+                for writer in self.writers:
                     try:
                         fmt = writer(
-                            use_cdc=cdc, data_page_version=data_page_version, **params
+                            use_cdc=self.cdc,
+                            data_page_version=data_page_version,
+                            **params,
                         )
                     except ValueError:
                         continue
-                    out = directory / page_version / case / fmt.name
-                    out.mkdir(parents=True, exist_ok=True)
-                    for datatype, table in tables.items():
-                        stem = re.sub(r"[^a-z0-9]+", "-", datatype).strip("-")
-                        key = (page_version, case, datatype)
-                        futures.setdefault(key, {})[fmt.name] = executor.submit(
-                            fmt.write, stem, table, out
-                        )
-        pending = [f for written in futures.values() for f in written.values()]
-        for _ in tqdm(as_completed(pending), total=len(pending)):
-            pass
+                    yield page_version, case, fmt
 
-    created_by: dict[str, str] = {}
-    results = []
-    for (page_version, case, datatype), written in futures.items():
-        for name, future in written.items():
-            if name not in created_by and future.exception() is None:
-                created_by[name] = pq.read_metadata(future.result()).created_by
-        reference = written.pop(ParquetCpp.name)
-        if reference.exception() is not None:
+    def run(self, max_workers: Optional[int] = None) -> ParityReport:
+        """Write every table with every format and compare them with parquet-cpp's."""
+        return self._compare(self._write(max_workers))
+
+    def _write(self, max_workers: Optional[int]) -> dict[Cell, dict[str, Future[Path]]]:
+        """Write every table with every format, the written file of each cell per
+        writer."""
+        tables = {
+            datatype: DataGenerator({"x": spec}).generate_table(self.num_rows)
+            for datatype, spec in DATATYPES.items()
+        }
+        written: dict[Cell, dict[str, Future[Path]]] = {}
+        with ThreadPoolExecutor(max_workers) as executor:
+            for page_version, case, fmt in self.formats():
+                out = self.directory / page_version / case / fmt.name
+                out.mkdir(parents=True, exist_ok=True)
+                for datatype, table in tables.items():
+                    stem = re.sub(r"[^a-z0-9]+", "-", datatype).strip("-")
+                    cell = Cell(page_version, case, datatype)
+                    written.setdefault(cell, {})[fmt.name] = executor.submit(
+                        fmt.write, stem, table, out
+                    )
+            futures = [f for files in written.values() for f in files.values()]
+            for _ in tqdm(as_completed(futures), total=len(futures)):
+                pass
+        return written
+
+    def _compare(self, written: dict[Cell, dict[str, Future[Path]]]) -> ParityReport:
+        """Compare the files of each cell with parquet-cpp's."""
+        created_by: dict[str, str] = {}
+        results = []
+        for cell, files in written.items():
+            for name, future in files.items():
+                if name not in created_by and future.exception() is None:
+                    created_by[name] = pq.read_metadata(future.result()).created_by
+            reference = files[ParquetCpp.name]
+            others = {name: f for name, f in files.items() if name != ParquetCpp.name}
             error = reference.exception()
-            message = f"parquet-cpp failed: {type(error).__name__}: {error}"
-            results += [
-                Parity(page_version, case, datatype, name, 0, 0, 0, 0, message)
-                for name in written
-            ]
-            continue
-        cpp = Layout.read(reference.result())
-        for name, future in written.items():
-            error = future.exception()
             if error is not None:
-                message = f"{type(error).__name__}: {error}"
-                results.append(
-                    Parity(page_version, case, datatype, name, 0, 0, 0, 0, message)
-                )
+                prefix = "parquet-cpp failed: "
+                results += [Parity.failed(cell, name, error, prefix) for name in others]
                 continue
-            layout = Layout.read(future.result())
-            pages = different_cuts = different_pages = empty_pages = 0
-            for column in cpp.columns:
-                different_cuts += len(set(cpp.cuts(column)) ^ set(layout.cuts(column)))
-                empty_pages += layout.empty_pages(column)
-                expected, actual = (
-                    [
-                        (p["row_group"], p["num_values"], p["payload_hash"])
-                        for p in side.column_pages(column)
-                    ]
-                    for side in (cpp, layout)
-                )
-                # a diff, so an extra or a missing page doesn't shift the rest
-                matcher = SequenceMatcher(None, expected, actual, autojunk=False)
-                longer = max(len(expected), len(actual))
-                pages += longer
-                different_pages += longer - sum(
-                    block.size for block in matcher.get_matching_blocks()
-                )
-            results.append(
-                Parity(
-                    page_version,
-                    case,
-                    datatype,
-                    name,
-                    pages,
-                    different_cuts,
-                    different_pages,
-                    empty_pages,
-                    error=None,
-                )
-            )
-    return dict(created_by=created_by, results=results)
+            cpp = Layout.read(reference.result())
+            for name, future in others.items():
+                error = future.exception()
+                if error is not None:
+                    results.append(Parity.failed(cell, name, error))
+                else:
+                    layout = Layout.read(future.result())
+                    results.append(Parity.compare(cell, name, cpp, layout))
+        return ParityReport(created_by, results)

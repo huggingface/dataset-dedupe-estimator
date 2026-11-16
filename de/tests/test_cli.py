@@ -1,9 +1,13 @@
+import io
+
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
+from rich.console import Console
 
 from de.cli import cli
+from de.display import print_report
 
 
 @pytest.fixture
@@ -191,7 +195,10 @@ class TestBenchCommands:
     @pytest.fixture
     def capture_reports(self, monkeypatch):
         reports = []
-        monkeypatch.setattr("de.cli.display.print_report", reports.append)
+        monkeypatch.setattr(
+            "de.cli.display.print_report",
+            lambda report, console: reports.append(report),
+        )
         return reports
 
     def test_bench_and_compare(self, runner, tmp_path, capture_reports):
@@ -218,6 +225,11 @@ class TestBenchCommands:
         result = runner.invoke(cli, ["compare", str(first), str(second)])
         assert result.exit_code == 0, result.output
         assert [len(report["runs"]) for report in capture_reports] == [1, 1, 2]
+        # the reports are captured, the display renders them all the same
+        console = Console(file=io.StringIO(), width=200)
+        for report in capture_reports:
+            print_report(report, console)
+        assert "vs First Run" in console.file.getvalue()
 
     def test_pages_and_page_diff(self, runner, tmp_path):
         table = pa.table({"a": list(range(100))})

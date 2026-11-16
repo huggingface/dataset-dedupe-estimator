@@ -1,15 +1,23 @@
-from dataclasses import asdict
-from typing import Optional
+from dataclasses import dataclass
+from functools import partial
+from operator import itemgetter
+from typing import Any, Callable, Generic, Hashable, Iterable, Sequence, TypeVar
 
 from humanize import naturalsize
 from rich.bar import Bar
-from rich.console import Console
+from rich.console import Console, JustifyMethod, RenderableType
 from rich.table import Table
 from rich.text import Text
 import plotly.graph_objects as go
 
 from .pages import Layout, PageDiff
-from .parity import Parity
+from .parity import CASES, DATATYPES, PAGE_VERSIONS, Parity, ParityReport
+
+Row = TypeVar("Row")
+
+_count = "{:,}".format
+_percent = "{:.1%}".format
+_size = partial(naturalsize, binary=True)
 
 
 def _bar_color(r, numfiles):
@@ -76,15 +84,15 @@ def print_table(results: list) -> None:
             row.group if is_first_in_group else "",
             Text(row.format.name, style=style),
             Text(row.format.paramstem, style=style),
-            Text(naturalsize(row.total_len, binary=True), style=style),
-            Text(naturalsize(row.chunk_bytes, binary=True), style=style),
+            Text(_size(row.total_len), style=style),
+            Text(_size(row.chunk_bytes), style=style),
             ratio_cell(ratio, row.numfiles, style=style),
         ]
         if has_xet:
             xet_ratio = round(row.xet_dedup_ratio, 2)
             values.extend(
                 [
-                    Text(naturalsize(row.xet_bytes, binary=True), style=style),
+                    Text(_size(row.xet_bytes), style=style),
                     ratio_cell(xet_ratio, row.numfiles, style=style),
                 ]
             )
@@ -122,7 +130,7 @@ def plot_bars(results: list, output_html: str | None = None) -> None:
                 y=sorted_formats,
                 x=ratios,
                 orientation="h",
-                text=[f"{v:.1%}" if v is not None else "" for v in ratios],
+                text=[_percent(v) if v is not None else "" for v in ratios],
                 textposition="outside",
             )
         )
@@ -143,240 +151,245 @@ def plot_bars(results: list, output_html: str | None = None) -> None:
     fig.show()
 
 
-def _table(*columns: str) -> Table:
-    """A table with right justified columns, except those prefixed with '<'."""
-    table = Table(show_header=True, header_style="bold magenta")
-    for column in columns:
-        left = column.startswith("<")
-        table.add_column(column.lstrip("<"), justify="left" if left else "right")
-    return table
+@dataclass(frozen=True)
+class Column(Generic[Row]):
+    """A table column: its header, a row's value and how the value is shown.
+
+    A row without a value (None) shows `missing` instead of failing to format it.
+    """
+
+    header: str
+    value: Callable[[Row], Any]
+    format: Callable[[Any], RenderableType] = str
+    justify: JustifyMethod = "right"
+    missing: RenderableType = ""
+
+    @classmethod
+    def text(cls, header: str, value: Callable[[Row], Any]) -> "Column[Row]":
+        """A left justified column of the value as text."""
+        return cls(header, value, justify="left")
+
+    def cell(self, row: Row) -> RenderableType:
+        value = self.value(row)
+        return self.missing if value is None else self.format(value)
 
 
-def print_pages(layout: Layout) -> None:
+@dataclass(frozen=True)
+class Listing(Generic[Row]):
+    """A titled table with a row per item, consecutive rows with a different section
+    key are separated."""
+
+    title: str
+    columns: Sequence[Column[Row]]
+    section: Callable[[Row], Hashable] = lambda row: None
+
+    def table(self, rows: Iterable[Row]) -> Table:
+        table = Table(show_header=True, header_style="bold magenta")
+        for column in self.columns:
+            table.add_column(column.header, justify=column.justify)
+        previous = None
+        for row in rows:
+            key = self.section(row)
+            # a no-op before the first row
+            if key != previous:
+                table.add_section()
+                previous = key
+            table.add_row(*(column.cell(row) for column in self.columns))
+        return table
+
+    def print(self, console: Console, rows: Iterable[Row]) -> None:
+        if self.title:
+            console.print(self.title)
+        console.print(self.table(rows))
+
+
+def print_pages(layout: Layout, console: Console) -> None:
     """Display every page of a parquet file, data pages with their level range."""
-    rows = []
+    pages = []
     for column in layout.columns:
         starts = (span.start for span in layout.spans(column))
         for page in layout.column_pages(column):
             is_data = page["page_type"] != "dictionary"
-            first_level = f"{next(starts):,}" if is_data else ""
-            rows.append(dict(page, first_level=first_level))
+            pages.append(dict(page, first_level=next(starts) if is_data else None))
     # file order: row group by row group, column by column
-    rows.sort(key=lambda row: (row["row_group"], row["column"]))
-    console = Console()
-    _print_rows(
-        console,
+    pages.sort(key=itemgetter("row_group", "column"))
+    Listing[dict](
         "Pages in file order, data pages with the level they start at",
-        rows,
-        ("row_group", "column"),
         [
-            ("Row Group", lambda row: str(row["row_group"])),
-            ("<Column", lambda row: row["path"]),
-            ("<Type", lambda row: row["page_type"]),
-            ("<Encoding", lambda row: row["encoding"]),
-            ("First Level", lambda row: row["first_level"]),
-            ("Values", lambda row: f"{row['num_values']:,}"),
-            ("Header", lambda row: f"{row['header_bytes']:,}"),
-            ("Compressed", lambda row: f"{row['compressed_bytes']:,}"),
-            ("Uncompressed", lambda row: f"{row['uncompressed_bytes']:,}"),
-            ("<Page Hash", lambda row: f"{row['page_hash']:016x}"),
-        ],
-    )
-
-    summary = _table("<Column", "Levels", "Data Pages", "Cuts", "Row Groups", "Empty")
-    for column in layout.columns:
-        spans = layout.spans(column)
-        summary.add_row(
-            layout.column_pages(column)[0]["path"],
-            f"{spans[-1].end:,}",
-            f"{len(spans):,}",
-            f"{len(layout.cuts(column)):,}",
-            f"{len(layout.row_group_starts(column)) + 1:,}",
-            f"{layout.empty_pages(column):,}",
-        )
-    console.print(summary)
-
-
-def print_page_diffs(diffs: list[PageDiff]) -> None:
-    """Display the page boundary agreement of two files per column."""
-    _print_rows(
-        Console(),
-        "Page boundaries and page bytes of the right file compared to the left one",
-        [asdict(diff) for diff in diffs],
-        (),
-        [
-            ("<Column", lambda row: row["path"]),
-            ("Left Pages", lambda row: f"{row['left_pages']:,}"),
-            ("Right Pages", lambda row: f"{row['right_pages']:,}"),
-            ("Common Cuts", lambda row: f"{row['common_cuts']:,}"),
-            ("Left Only", lambda row: f"{row['left_only_cuts']:,}"),
-            ("Right Only", lambda row: f"{row['right_only_cuts']:,}"),
-            (
-                "First Divergence",
-                lambda row: (
-                    ""
-                    if row["first_divergence"] is None
-                    else f"{row['first_divergence']:,}"
-                ),
+            Column("Row Group", itemgetter("row_group")),
+            Column.text("Column", itemgetter("path")),
+            Column.text("Type", itemgetter("page_type")),
+            Column.text("Encoding", itemgetter("encoding")),
+            Column("First Level", itemgetter("first_level"), _count),
+            Column("Values", itemgetter("num_values"), _count),
+            Column("Header", itemgetter("header_bytes"), _count),
+            Column("Compressed", itemgetter("compressed_bytes"), _count),
+            Column("Uncompressed", itemgetter("uncompressed_bytes"), _count),
+            Column(
+                "Page Hash", itemgetter("page_hash"), "{:016x}".format, justify="left"
             ),
-            ("New Bytes", lambda row: f"{row['new_bytes'] / row['right_bytes']:.1%}"),
-            ("New Payloads", lambda row: f"{row['new_payloads']:,}"),
         ],
-    )
+        section=itemgetter("row_group", "column"),
+    ).print(console, pages)
+    Listing[int](
+        "",
+        [
+            Column.text(
+                "Column", lambda column: layout.column_pages(column)[0]["path"]
+            ),
+            Column("Levels", lambda column: layout.spans(column)[-1].end, _count),
+            Column("Data Pages", lambda column: len(layout.spans(column)), _count),
+            Column("Cuts", lambda column: len(layout.cuts(column)), _count),
+            Column(
+                "Row Groups",
+                lambda column: len(layout.row_group_starts(column)) + 1,
+                _count,
+            ),
+            Column("Empty", layout.empty_pages, _count),
+        ],
+    ).print(console, layout.columns)
 
 
-def _parity_cell(result: Optional[Parity]) -> Text:
-    if result is None:
-        return Text("n/a", style="dim")
+def print_page_diffs(diffs: list[PageDiff], console: Console) -> None:
+    """Display the page boundary agreement of two files per column."""
+    Listing[PageDiff](
+        "Page boundaries and page bytes of the right file compared to the left one",
+        [
+            Column.text("Column", lambda diff: diff.path),
+            Column("Left Pages", lambda diff: diff.left_pages, _count),
+            Column("Right Pages", lambda diff: diff.right_pages, _count),
+            Column("Common Cuts", lambda diff: diff.common_cuts, _count),
+            Column("Left Only", lambda diff: diff.left_only_cuts, _count),
+            Column("Right Only", lambda diff: diff.right_only_cuts, _count),
+            Column("First Divergence", lambda diff: diff.first_divergence, _count),
+            Column(
+                "New Bytes", lambda diff: diff.new_bytes / diff.right_bytes, _percent
+            ),
+            Column("New Payloads", lambda diff: diff.new_payloads, _count),
+        ],
+    ).print(console, diffs)
+
+
+def _parity_cell(result: Parity) -> Text:
     if result.error is not None:
         return Text("error", style="bold red")
-    empty = f", {result.empty_pages:,} empty" if result.empty_pages else ""
+    empty = f", {_count(result.empty_pages)} empty" if result.empty_pages else ""
     if result.different_cuts:
-        return Text(f"{result.different_cuts:,} cuts{empty}", style="red")
+        return Text(f"{_count(result.different_cuts)} cuts{empty}", style="red")
     if result.different_pages:
-        pages = f"{result.different_pages:,}/{result.pages:,}"
+        pages = f"{_count(result.different_pages)}/{_count(result.pages)}"
         return Text(f"{pages}{empty}", style="yellow")
     return Text("✓", style="green")
 
 
-def print_parity(report: dict) -> None:
+def print_parity(report: ParityReport, console: Console) -> None:
     """Display each writer's page parity with parquet-cpp per page version, datatype
     and case."""
-    console = Console()
-    writers = _table("<Writer", "<Created By")
-    for writer, created_by in report["created_by"].items():
-        writers.add_row(writer, created_by)
-    console.print(writers)
-
-    results = report["results"]
-    page_versions = list(dict.fromkeys(result.page_version for result in results))
-    cases = list(dict.fromkeys(result.case for result in results))
-    datatypes = list(dict.fromkeys(result.datatype for result in results))
-    cells = {(r.writer, r.page_version, r.datatype, r.case): r for r in results}
+    Listing[str](
+        "",
+        [
+            Column.text("Writer", str),
+            Column.text("Created By", report.created_by.get),
+        ],
+    ).print(console, report.created_by)
     console.print(
         "Pages against parquet-cpp's: ✓ identical, N cuts in only one of the files, "
         "N/M of the M pages unmatched by a diff of the pages (row group, values and "
         "bytes, headers aside), K empty data pages, n/a when the writer can't "
         "express the case"
     )
-    for writer in dict.fromkeys(result.writer for result in results):
-        for page_version in page_versions:
-            _print_rows(
-                console,
+    for writer in report.writers:
+        for page_version in PAGE_VERSIONS:
+            Listing[str](
                 f"{writer}, {page_version} data pages",
-                [dict(datatype=datatype) for datatype in datatypes],
-                (),
                 [
-                    ("<Datatype", lambda row: row["datatype"]),
+                    Column.text("Datatype", str),
                     *(
-                        (
-                            f"<{case}",
-                            lambda row, key=(writer, page_version), case=case: (
-                                _parity_cell(cells.get((*key, row["datatype"], case)))
-                            ),
+                        Column(
+                            case,
+                            partial(report.get, writer, page_version, case),
+                            _parity_cell,
+                            justify="left",
+                            missing=Text("n/a", style="dim"),
                         )
-                        for case in cases
+                        for case in CASES
                     ),
                 ],
-            )
-    # each distinct error once per writer, e.g. a missing PARQUET_JAVA_CLASSPATH
-    errors: dict[tuple[str, str], list[str]] = {}
-    for result in results:
-        if result.error is not None:
-            line = result.error.strip().splitlines()[0]
-            cell = f"{result.page_version} {result.case} {result.datatype}"
-            errors.setdefault((result.writer, line), []).append(cell)
-    for (writer, line), failed in errors.items():
-        where = failed[0] if len(failed) == 1 else f"{len(failed)} cells"
+            ).print(console, DATATYPES)
+    for (writer, line), failed in report.errors().items():
+        where = " ".join(failed[0].cell) if len(failed) == 1 else f"{len(failed)} cells"
         # assembled as plain text, errors may contain brackets rich would parse
         console.print(Text.assemble((f"{writer} {where}", "red"), f": {line}"))
 
 
-def _print_rows(
-    console: Console, title: str, rows: list[dict], section: tuple, columns: list
-) -> None:
-    """Print rows as a table of (header, cell) columns, one section per section key."""
-    table = _table(*(header for header, _ in columns))
-    previous = None
-    for row in rows:
-        key = tuple(row[name] for name in section)
-        if key != previous:
-            table.add_section()
-            previous = key
-        table.add_row(*(cell(row) for _, cell in columns))
-    console.print(title)
-    console.print(table)
-
-
-def print_report(report: dict) -> None:
+def print_report(report: dict, console: Console) -> None:
     """Display the page cut, deduplication and cross implementation results of runs."""
-    console = Console()
-    runs = _table("<Run", "<pyarrow", "<Arrow Git Id", "<Written By")
-    for run in report["runs"]:
-        runs.add_row(
-            run["label"],
-            run["pyarrow"],
-            run["arrow_git_id"][:12],
-            "\n".join(run["created_by"].values()),
-        )
-    console.print(runs)
+    Listing[dict](
+        "",
+        [
+            Column.text("Run", itemgetter("label")),
+            Column.text("pyarrow", itemgetter("pyarrow")),
+            Column.text("Arrow Git Id", lambda run: run["arrow_git_id"][:12]),
+            Column.text(
+                "Written By", lambda run: "\n".join(run["created_by"].values())
+            ),
+        ],
+    ).print(console, report["runs"])
 
     # the run columns are only interesting when comparing runs
     multiple = len(report["runs"]) > 1
-    run = [("<Run", lambda row: row["run"])] if multiple else []
-    versus = [("<vs First Run", lambda row: row["versus"])] if multiple else []
+    run: list[Column[dict]] = (
+        [Column.text("Run", itemgetter("run"))] if multiple else []
+    )
+    versus: list[Column[dict]] = (
+        [Column.text("vs First Run", itemgetter("versus"))] if multiple else []
+    )
 
-    _print_rows(
-        console,
+    Listing[dict](
         "Page cuts against each writer's single row group oracle (PLAIN, no page "
         "limits), ideally recall 100%, extra 0, aligned 100%, resync 0",
-        report["persistence"],
-        ("layout",),
         [
-            ("<Layout", lambda row: row["layout"]),
-            ("<Writer", lambda row: row["writer"]),
+            Column.text("Layout", itemgetter("layout")),
+            Column.text("Writer", itemgetter("writer")),
             *run,
-            ("Col", lambda row: str(row["column"])),
-            ("Recall", lambda row: f"{row['recall']:.1%}"),
-            ("Extra", lambda row: f"{row['extra']:,}"),
-            ("Aligned", lambda row: f"{row['aligned']:.1%}"),
-            ("Resync", lambda row: f"{row['resync']:,.0f}"),
-            ("Empty", lambda row: f"{row['empty']:,}"),
+            Column("Col", itemgetter("column")),
+            Column("Recall", itemgetter("recall"), _percent),
+            Column("Extra", itemgetter("extra"), _count),
+            Column("Aligned", itemgetter("aligned"), _percent),
+            Column("Resync", itemgetter("resync"), "{:,.0f}".format),
+            Column("Empty", itemgetter("empty"), _count),
             *versus,
         ],
-    )
-    _print_rows(
-        console,
+        section=itemgetter("layout"),
+    ).print(console, report["persistence"])
+    Listing[dict](
         "Deduplication of the original with its edited version (lower is better, "
         "50% is ideal), new bytes are the edited file's page bytes not in the "
         "original, empty pages are the edited file's data pages without values",
-        report["dedup"],
-        ("profile", "edit", "layout"),
         [
-            ("<Profile", lambda row: row["profile"]),
-            ("<Edit", lambda row: row["edit"]),
-            ("<Layout", lambda row: row["layout"]),
-            ("<Writer", lambda row: row["writer"]),
+            Column.text("Profile", itemgetter("profile")),
+            Column.text("Edit", itemgetter("edit")),
+            Column.text("Layout", itemgetter("layout")),
+            Column.text("Writer", itemgetter("writer")),
             *run,
-            ("Total Size", lambda row: naturalsize(row["total_len"], binary=True)),
-            ("Dedup Ratio", lambda row: f"{row['dedup_ratio']:.1%}"),
-            ("Xet Dedup Ratio", lambda row: f"{row['xet_dedup_ratio']:.1%}"),
-            ("New Bytes", lambda row: f"{row['new_bytes']:.1%}"),
-            ("Empty Pages", lambda row: f"{row['empty_pages']:,}"),
+            Column("Total Size", itemgetter("total_len"), _size),
+            Column("Dedup Ratio", itemgetter("dedup_ratio"), _percent),
+            Column("Xet Dedup Ratio", itemgetter("xet_dedup_ratio"), _percent),
+            Column("New Bytes", itemgetter("new_bytes"), _percent),
+            Column("Empty Pages", itemgetter("empty_pages"), _count),
         ],
-    )
-    _print_rows(
-        console,
+        section=itemgetter("profile", "edit", "layout"),
+    ).print(console, report["dedup"])
+    Listing[dict](
         "Page cuts of the same data written by different implementations",
-        report["cross_impl"],
-        ("profile", "layout"),
         [
-            ("<Profile", lambda row: row["profile"]),
-            ("<Layout", lambda row: row["layout"]),
-            ("<Pair", lambda row: row["pair"]),
+            Column.text("Profile", itemgetter("profile")),
+            Column.text("Layout", itemgetter("layout")),
+            Column.text("Pair", itemgetter("pair")),
             *run,
-            ("Common", lambda row: f"{row['common']:,}"),
-            ("Left Only", lambda row: f"{row['left_only']:,}"),
-            ("Right Only", lambda row: f"{row['right_only']:,}"),
+            Column("Common", itemgetter("common"), _count),
+            Column("Left Only", itemgetter("left_only"), _count),
+            Column("Right Only", itemgetter("right_only"), _count),
         ],
-    )
+        section=itemgetter("profile", "layout"),
+    ).print(console, report["cross_impl"])
