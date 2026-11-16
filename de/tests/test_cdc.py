@@ -33,8 +33,8 @@ from de.formats import (
     ParquetJava,
     ParquetRs,
 )
-from de.pages import Layout, Persistence, persistence
-from de.synthetic import DataGenerator
+from de.pages import Layout, Persistence, changes, persistence
+from de.synthetic import DataGenerator, evenly_spaced
 
 CDC = CdcParams(min_chunk_size=8 * 1024, max_chunk_size=32 * 1024, norm_level=0)
 
@@ -128,6 +128,19 @@ LAYOUTS = [
     "batches",
     "tiny-batches",
 ]
+# edit -> (kind, positions): the generator's edits, at least two maximum chunks apart
+EDITS: dict[str, tuple[str, list[float]]] = {
+    "insert": ("insert", [0.5]),
+    "insert-twice": ("insert", evenly_spaced(2)),
+    "delete": ("delete", [0.5]),
+    "delete-twice": ("delete", evenly_spaced(2)),
+    "update": ("update", [0.5]),
+    "update-twice": ("update", evenly_spaced(2)),
+    "prepend": ("prepend", [0.0]),
+    "append": ("append", [1.0]),
+}
+# about the bytes the chunker hashes per edit
+EDIT_BYTES = 256
 # (writer, type) -> why it's skipped: the writer writes the type as another parquet type
 UNSUPPORTED: dict[tuple[str, str], str] = {
     ("duckdb", "float16"): "duckdb writes float16 as FLOAT",
@@ -213,6 +226,13 @@ class Corpus:
                 for layout in LAYOUTS:
                     yield Key(type, nulls, setting, layout=layout)
             yield Key(type, nulls, "no-cdc")
+            for edit in EDITS:
+                if not self._constant_update(type, nulls, edit):
+                    yield Key(type, nulls, table=edit)
+            for table in ("base", "insert", "delete", "update"):
+                if not self._constant_update(type, nulls, table):
+                    yield Key(type, nulls, table=table, layout="middle-rg")
+            yield Key(type, nulls, layout="row-limit")
 
     def table(self, type: str, nulls: str, name: str = "base") -> pa.Table:
         if (type, nulls, name) not in self._tables:
@@ -224,7 +244,11 @@ class Corpus:
         definition level."""
         if (type, nulls) not in self._bytes_per_row:
             sample = self._generator(type, nulls).generate_table(1000)
-            self._bytes_per_row[type, nulls] = sample.nbytes / len(sample) + 2
+            [array] = sample.column(0).chunks
+            # a dictionary array's dictionary is shared by every row
+            if isinstance(array, pa.DictionaryArray):
+                array = array.indices
+            self._bytes_per_row[type, nulls] = array.nbytes / len(array) + 2
         return self._bytes_per_row[type, nulls]
 
     def format(self, writer: type[Parquet], key: Key) -> Parquet:
@@ -273,7 +297,59 @@ class Corpus:
         if name == "base":
             rows = int(BUDGET / self.bytes_per_row(type, nulls))
             return self._generator(type, nulls).generate_table(rows)
-        raise ValueError(f"unknown table: {name}")
+        base = self.table(type, nulls)
+        generator = self._generator(type, nulls, seed=1)
+        size = self.edit_size(type, nulls)
+        kind, positions = EDITS[name]
+        if kind == "insert":
+            return generator.insert_rows(base, positions, size)
+        if kind == "delete":
+            return generator.delete_rows(base, positions, size)
+        if kind == "update":
+            return generator.update_rows(base, positions, size)
+        edit = generator.generate_table(size)
+        pieces = [edit, base] if kind == "prepend" else [base, edit]
+        return pa.concat_tables(pieces).combine_chunks()
+
+    def edit_size(self, type: str, nulls: str) -> int:
+        return max(1, int(EDIT_BYTES / self.bytes_per_row(type, nulls)))
+
+    def edit_levels(
+        self, type: str, nulls: str, edit: str, column: int
+    ) -> list[tuple[int, int]]:
+        """The base level where each edit starts and its level delta, by the
+        generator's row arithmetic: an insert goes in at row int(p * n), a delete
+        removes the edit size rows before it, an update replaces the row at it."""
+        base, edited = self.table(type, nulls), self.table(type, nulls, edit)
+        n, size = len(base), self.edit_size(type, nulls)
+        kind, positions = EDITS[edit]
+
+        def count(table: pa.Table) -> int:
+            return levels(table)[column]
+
+        if kind == "prepend":
+            return [(0, count(edited.slice(0, size)))]
+        if kind == "append":
+            return [(count(base), count(edited.slice(n, size)))]
+        result = []
+        for i, position in enumerate(positions):
+            row = int(position * n)
+            if kind == "insert":
+                inserted = edited.slice(row + i * size, size)
+                result.append((count(base.slice(0, row)), count(inserted)))
+            elif kind == "delete":
+                start = row - size
+                deleted = base.slice(start, size)
+                result.append((count(base.slice(0, start)), -count(deleted)))
+            else:
+                updated = edited.slice(row, 1)
+                delta = count(updated) - count(base.slice(row, 1))
+                result.append((count(base.slice(0, row)), delta))
+        return result
+
+    def _constant_update(self, type: str, nulls: str, table: str) -> bool:
+        """An update of a constant column, which has no value to change."""
+        return (type, nulls) in CONSTANT and table.startswith("update")
 
     def _format(self, writer: type[Parquet], key: Key) -> Parquet | str:
         """The writer's format of the key, or why it can't write it."""
@@ -302,6 +378,11 @@ class Corpus:
         )
         if key.layout == "oracle":
             return {"row_group_size": max(1, rows)}
+        if key.layout == "middle-rg":
+            return {"row_group_size": len(self.table(key.type, key.nulls)) // 5 + 1}
+        if key.layout == "row-limit":
+            cut = self.first_cut_row(key.type, key.nulls)
+            return {"row_group_size": max(1, rows), "max_rows_per_page": cut // 3 + 1}
         if key.layout == "large-rgs":
             return {"row_group_size": large}
         if key.layout == "tiny-rgs":
@@ -396,10 +477,17 @@ def test_settings_dont_move_cuts(corpus, writer, type, nulls, layout, setting):
     ]
 
 
-@pytest.mark.parametrize("setting", SETTINGS)
+@pytest.mark.parametrize(
+    "setting, table",
+    [(setting, "base") for setting in SETTINGS] + [("v1", edit) for edit in EDITS],
+)
 @pytest.mark.parametrize("type, nulls", CASES)
-def test_same_cuts_as_parquet_cpp(corpus, writer, type, nulls, setting):
-    key = Key(type, nulls, setting)
+def test_same_cuts_as_parquet_cpp(corpus, writer, type, nulls, setting, table):
+    """The oracles' pages are parquet-cpp's, of every setting and edited table: so
+    every writer resyncs after an edit exactly like parquet-cpp."""
+    if (type, nulls) in CONSTANT and table.startswith("update"):
+        pytest.skip("a constant column has no value to update")
+    key = Key(type, nulls, setting, table)
     result, cpp = corpus.layout(writer, key), corpus.layout(ParquetCpp, key)
     assert [result.spans(c) for c in result.columns] == [
         cpp.spans(c) for c in cpp.columns
@@ -437,3 +525,82 @@ def test_resetting_chunkers_would_be_caught(corpus, tmp_path, type, layout):
 def test_no_cuts_without_cdc(corpus, writer, type, nulls):
     result = corpus.layout(writer, Key(type, nulls, "no-cdc"))
     assert [result.cuts(c) for c in result.columns] == [[] for _ in result.columns]
+
+
+@pytest.mark.parametrize("edit", EDITS)
+@pytest.mark.parametrize("type, nulls", CASES)
+def test_edit_is_local(corpus, writer, type, nulls, edit):
+    """The pages an edit changes are the ones around it, by exactly its levels.
+
+    Every change covers an edit and every edit is covered, each change's level delta
+    is exactly its edits', and every other page is byte identical. How soon the
+    chunker resyncs on the content after an edit depends on the data (a cut needs
+    consecutive gear hash matches past the minimum chunk size, and low entropy data
+    is mostly cut at the maximum size), so close edits may share a change;
+    test_same_cuts_as_parquet_cpp holds every writer to parquet-cpp's resync.
+
+    The constant columns only cut at the maximum chunk size, so every edit shifts
+    their content to the last page, which is the only one changing.
+    """
+    if (type, nulls) in CONSTANT and edit.startswith("update"):
+        pytest.skip("a constant column has no value to update")
+    base = corpus.layout(writer, Key(type, nulls))
+    edited = corpus.layout(writer, Key(type, nulls, table=edit))
+    for column in base.columns:
+        found = changes(base, edited, column)
+        expected = corpus.edit_levels(type, nulls, edit, column)
+        if (type, nulls) in CONSTANT:
+            [change] = found
+            assert change.base[1] == base.spans(column)[-1].end
+            assert change.delta == sum(delta for _, delta in expected)
+            continue
+
+        def covers(change, position):
+            return change.base[0] <= position <= change.base[1]
+
+        assert all(any(covers(c, p) for c in found) for p, _ in expected)
+        for change in found:
+            assert any(covers(change, p) for p, _ in expected)
+            assert change.delta == sum(d for p, d in expected if covers(change, p))
+
+
+@pytest.mark.parametrize("edit", ["insert", "delete", "update"])
+@pytest.mark.parametrize("type, nulls", CASES)
+def test_edit_in_middle_row_group(corpus, writer, type, nulls, edit):
+    """With row groups, an edit renews only the pages its single row group change
+    renews, and the pages next to the row group boundaries it shifts: the two on each
+    side of a boundary, as a shifted cut can move a page's content across it. The row
+    groups before the edit stay identical, and an update shifts nothing."""
+    if (type, nulls) in CONSTANT and edit == "update":
+        pytest.skip("a constant column has no value to update")
+    base = corpus.layout(writer, Key(type, nulls, layout="middle-rg"))
+    edited = corpus.layout(writer, Key(type, nulls, table=edit, layout="middle-rg"))
+    oracles = (Key(type, nulls), Key(type, nulls, table=edit))
+    for column in base.columns:
+        renewed = changes(*(corpus.layout(writer, k) for k in oracles), column)
+        [(position, _)] = corpus.edit_levels(type, nulls, edit, column)
+        payloads = {p["payload_hash"] for p in base.column_pages(column)}
+        pages = [
+            p for p in edited.column_pages(column) if p["page_type"] != "dictionary"
+        ]
+        spans = edited.spans(column)
+        edited_rg = next(s.row_group for s in spans if s.end > position)
+        for page, span in zip(pages, spans):
+            if page["payload_hash"] in payloads:
+                continue
+            assert span.row_group >= edited_rg
+            in_group = [s for s in spans if s.row_group == span.row_group]
+            index = in_group.index(span)
+            at_boundary = edit != "update" and (index < 2 or index >= len(in_group) - 2)
+            near_change = any(
+                span.start <= c.edited[1] and c.edited[0] <= span.end for c in renewed
+            )
+            assert near_change or at_boundary, span
+
+
+@pytest.mark.parametrize("type, nulls", CASES)
+def test_page_row_limit_keeps_cdc_cuts(corpus, writer, type, nulls):
+    """Pages cut by the row limit don't reset the chunker: every CDC cut stays."""
+    limited = corpus.layout(writer, Key(type, nulls, layout="row-limit"))
+    oracle = corpus.layout(writer, Key(type, nulls))
+    assert all(r.recall == 1.0 and r.empty == 0 for r in persistence(limited, oracle))
