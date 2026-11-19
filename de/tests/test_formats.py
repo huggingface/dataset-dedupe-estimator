@@ -384,22 +384,6 @@ class TestParquetCppStreaming:
         # write() checks that the file reads back as the table
         ParquetCpp(use_cdc=CDC, batch_size=100).write("out", data, tmp_path)
 
-    def test_program_follows_the_pyarrow_libraries(self, tmp_path, monkeypatch):
-        # a pyarrow built from source lists more library directories, and a program
-        # built against another pyarrow's libraries mustn't be reused
-        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-        first = ParquetCpp._program()
-        libdirs = pa.get_library_dirs()
-        monkeypatch.setattr(pa, "get_library_dirs", lambda: [*libdirs, str(tmp_path)])
-        assert ParquetCpp._program() != first
-
-    def test_missing_compiler(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("CXX", str(tmp_path / "no-compiler"))
-        monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
-        fmt = ParquetCpp(use_cdc=False, batch_size=10)
-        with pytest.raises(RuntimeError, match="no-compiler"):
-            fmt.write("out", pa.table({"x": [1]}), tmp_path)
-
 
 needs_java = pytest.mark.skipif(
     not os.environ.get("PARQUET_JAVA_CLASSPATH"),

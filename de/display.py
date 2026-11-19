@@ -11,7 +11,7 @@ from rich.text import Text
 import plotly.graph_objects as go
 
 from .pages import Layout, PageDiff
-from .parity import CASES, DATATYPES, PAGE_VERSIONS, Parity, ParityReport
+from .parity import CASES, PAGE_VERSIONS, Parity, ParityReport
 
 Row = TypeVar("Row")
 
@@ -296,7 +296,7 @@ def print_parity(report: ParityReport, console: Console) -> None:
         "Pages against parquet-cpp's: ✓ identical, N cuts in only one of the files, "
         "N/M of the M pages unmatched by a diff of the pages (row group, values and "
         "bytes, headers aside), K empty data pages, n/a when the writer can't "
-        "express the case"
+        "express the case or write the type"
     )
     for writer in report.writers:
         for page_version in PAGE_VERSIONS:
@@ -315,7 +315,7 @@ def print_parity(report: ParityReport, console: Console) -> None:
                         for case in CASES
                     ),
                 ],
-            ).print(console, DATATYPES)
+            ).print(console, report.datatypes)
     for (writer, line), failed in report.errors().items():
         where = " ".join(failed[0].cell) if len(failed) == 1 else f"{len(failed)} cells"
         # assembled as plain text, errors may contain brackets rich would parse

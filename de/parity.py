@@ -1,11 +1,12 @@
 """Page parity of parquet writers with parquet-cpp.
 
-Every writer writes the same tables, one per datatype, with the settings of each
-case and both data page versions, and its pages are diffed with parquet-cpp's: the
-row group, the number of values and the payload bytes of each page. The page
-headers are left out, they differ for the reasons below. With v2 data pages every
-writer uses the encodings of writer version 2.0 (see de.formats.Parquet), the only
-ones parquet-java writes v2 pages with.
+Every writer writes the same single column tables, of each type with and without
+nulls (test_cdc's tables too), with the settings of each case and both data page
+versions, and its pages are diffed with parquet-cpp's: the row group, the number of
+values and the payload bytes of each page. The page headers are left out, they
+differ for the reasons below. With v2 data pages every writer uses the encodings of
+writer version 2.0 (see de.formats.Parquet), the only ones parquet-java writes v2
+pages with.
 
 The parquet spec says nothing about content defined chunking, nor about writers
 writing the same bytes, so the known differences are all valid parquet. Payloads,
@@ -56,38 +57,118 @@ chunk new. parquet-cpp and parquet-rs write the same bytes with both page versio
 parquet-java only with v1 pages of nested columns where the level encoding agrees.
 """
 
-from concurrent.futures import Future, ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from functools import cached_property
 from pathlib import Path
 import re
-from typing import Any, Iterator, NamedTuple, Optional
+from typing import Any, Iterator, NamedTuple, Optional, Sequence
 
 import pyarrow.parquet as pq
 from tqdm import tqdm
 
 from .bench import MAX_ROW_GROUP_SIZE, NO_PAGE_LIMITS
-from .formats import CdcParams, Parquet, ParquetCpp
+from .formats import CdcParams, Parquet, ParquetCpp, ParquetDuckDB
 from .pages import Layout
 from .synthetic import DataGenerator
 
-# a single leaf column each
-DATATYPES: dict[str, Any] = {
-    "int": "int",
-    "int64": "int64",
-    "float": "float",
+# type -> DataGenerator spec of the table's single column
+TYPES: dict[str, Any] = {
     "bool": "bool",
-    "str": "str",
-    "largestr": "largestr",
-    "zeros": "zeros",
+    "int8": "int8",
+    "int16": "int16",
+    "int32": "int32",
+    "int64": "int",
+    "uint8": "uint8",
+    "uint16": "uint16",
+    "uint32": "uint32",
+    "uint64": "uint64",
+    "float16": "float16",
+    "float32": "float32",
+    "float64": "float",
+    "decimal128": "decimal128",
+    "decimal256": "decimal256",
+    "date32": "date32",
+    "time32": "time32",
+    "time64": "time64",
+    "timestamp": "timestamp",
+    "binary": "binary",
+    "fixed": "fixed",
+    "string": "str",
+    "list<int16>": ["int16"],
     "list<int>": ["int"],
-    "list<str>": ["str"],
-    "list<list<int>>": [["int"]],
-    "struct<float>": {"x": "float"},
-    "struct<list<int>>": {"x": ["int"]},
+    "list<string>": ["str"],
+    "struct<int,string>": {"a": "int", "b": "str"},
+    "struct<float64>": {"x": "float"},
     "list<struct<int>>": [{"x": "int"}],
+    "list<list<int>>": [["int"]],
+    "list<struct<list<int>>>": [{"x": ["int"]}],
+    "zeros": "zeros",
+    "all-null": "nulls",
+    "largebinary": "largebinary",
+    "largestring": "largestring",
+    "dictionary": "dictionary",
+    "duration": "duration",
+    "json": "json",
+    "list<int>/null-segments": "nullsegments",
 }
+NULLS = {"0%": 0.0, "10%": 0.1}
+# the types with a single share of nulls: all-null has no non-null values, null
+# segments need null lists
+SINGLE_NULLS = {"all-null": "0%", "list<int>/null-segments": "10%"}
+# (type, nulls) of every table
+DATATYPES = [
+    (type, nulls)
+    for type in TYPES
+    for nulls in NULLS
+    if SINGLE_NULLS.get(type, nulls) == nulls
+]
+# the arrow types the writers without arrow input never see
+ARROW_ONLY = {
+    "largebinary",
+    "largestring",
+    "dictionary",
+    "duration",
+    "json",
+    "list<int>/null-segments",
+}
+# writer -> type -> why the writer can't write the type: it writes another parquet type
+UNSUPPORTED: dict[str, dict[str, str]] = {
+    ParquetDuckDB.name: {
+        "float16": "duckdb writes float16 as FLOAT",
+        "fixed": "duckdb writes fixed size binary as variable length binary",
+        "decimal256": "duckdb writes decimal(40, 6) as DOUBLE",
+        "time32": "duckdb writes TIME(MILLIS) as TIME(MICROS)",
+    },
+}
+
+
+def generator(type: str, nulls: str, seed: int = 0) -> DataGenerator:
+    """The generator of a type's single column tables with its share of nulls."""
+    return DataGenerator({"x": TYPES[type]}, seed=seed, null_ratio=NULLS[nulls])
+
+
+def unsupported(fmt: Parquet, type: str) -> Optional[str]:
+    """Why the format can't write a type so that it reads back the same, None if it
+    can."""
+    if type in UNSUPPORTED.get(fmt.name, {}):
+        return UNSUPPORTED[fmt.name][type]
+    if type in ARROW_ONLY and not fmt.arrow_input:
+        return f"{fmt.name} never sees the arrow type of {type}"
+    if (
+        type == "dictionary"
+        and fmt.data_page_version == "2.0"
+        and not fmt.use_dictionary
+    ):
+        return "pyarrow can't read delta encoded pages back as a dictionary array"
+    return None
+
+
+def datatype_label(type: str, nulls: str) -> str:
+    """The name of a table in the report: its type, and its nulls if it has any."""
+    return type if nulls == "0%" else f"{type} {nulls} nulls"
+
 
 # PLAIN and uncompressed in a single row group, pages end at CDC chunk boundaries
 PLAIN: dict[str, Any] = dict(
@@ -188,6 +269,10 @@ class ParityReport:
     def writers(self) -> list[str]:
         return list(dict.fromkeys(result.writer for result in self.results))
 
+    @property
+    def datatypes(self) -> list[str]:
+        return list(dict.fromkeys(result.cell.datatype for result in self.results))
+
     @cached_property
     def _results(self) -> dict[tuple[str, Cell], Parity]:
         return {(result.writer, result.cell): result for result in self.results}
@@ -195,7 +280,8 @@ class ParityReport:
     def get(
         self, writer: str, page_version: str, case: str, datatype: str
     ) -> Optional[Parity]:
-        """A writer's parity of a cell, None if the writer can't express the case."""
+        """A writer's parity of a cell, None if the writer can't express the case or
+        write the type."""
         return self._results.get((writer, Cell(page_version, case, datatype)))
 
     def errors(self) -> dict[tuple[str, str], list[Parity]]:
@@ -216,7 +302,8 @@ class ParityCheck:
     """Writes every datatype with every page version, case and writer, and compares
     each writer's pages with parquet-cpp's.
 
-    The files are kept at directory/page_version/case/writer/datatype-params.parquet.
+    The datatypes are the given types, with and without nulls. The files are kept at
+    directory/page_version/case/writer/datatype-params.parquet.
     """
 
     def __init__(
@@ -225,6 +312,7 @@ class ParityCheck:
         writers: list[type[Parquet]],
         num_rows: int,
         cdc: CdcParams,
+        types: Sequence[str],
     ):
         assert num_rows <= MAX_ROW_GROUP_SIZE, "plain needs a single row group"
         self.directory = directory
@@ -232,6 +320,9 @@ class ParityCheck:
         self.writers: list[type[Parquet]] = list(dict.fromkeys([ParquetCpp, *writers]))
         self.num_rows = num_rows
         self.cdc = cdc
+        self.datatypes = [
+            (datatype, nulls) for datatype, nulls in DATATYPES if datatype in types
+        ]
 
     def formats(self) -> Iterator[tuple[str, str, Parquet]]:
         """Each writer's format of every page version and case, except the cases a
@@ -253,50 +344,64 @@ class ParityCheck:
         """Write every table with every format and compare them with parquet-cpp's."""
         return self._compare(self._write(max_workers))
 
-    def _write(self, max_workers: Optional[int]) -> dict[Cell, dict[str, Future[Path]]]:
-        """Write every table with every format, the written file of each cell per
-        writer."""
+    def _write(
+        self, max_workers: Optional[int]
+    ) -> dict[Cell, dict[str, Path | BaseException]]:
+        """Write every table with every format, a batch per writer with the batches
+        side by side, the written file or the error of each cell per writer. A writer
+        leaves out the types it can't write."""
         tables = {
-            datatype: DataGenerator({"x": spec}).generate_table(self.num_rows)
-            for datatype, spec in DATATYPES.items()
+            (datatype, nulls): generator(datatype, nulls).generate_table(self.num_rows)
+            for datatype, nulls in self.datatypes
         }
-        written: dict[Cell, dict[str, Future[Path]]] = {}
-        with ThreadPoolExecutor(max_workers) as executor:
-            for page_version, case, fmt in self.formats():
-                out = self.directory / page_version / case / fmt.name
-                out.mkdir(parents=True, exist_ok=True)
-                for datatype, table in tables.items():
-                    stem = re.sub(r"[^a-z0-9]+", "-", datatype).strip("-")
-                    cell = Cell(page_version, case, datatype)
-                    written.setdefault(cell, {})[fmt.name] = executor.submit(
-                        fmt.write, stem, table, out
-                    )
-            futures = [f for files in written.values() for f in files.values()]
-            for _ in tqdm(as_completed(futures), total=len(futures)):
-                pass
+        jobs: dict[type[Parquet], list[tuple[Cell, tuple]]] = {}
+        for page_version, case, fmt in self.formats():
+            out = self.directory / page_version / case / fmt.name
+            out.mkdir(parents=True, exist_ok=True)
+            for (datatype, nulls), table in tables.items():
+                if unsupported(fmt, datatype):
+                    continue
+                label = datatype_label(datatype, nulls)
+                stem = re.sub(r"[^a-z0-9]+", "-", label).strip("-")
+                job = (fmt, stem, table, out)
+                jobs.setdefault(fmt.__class__, []).append(
+                    (Cell(page_version, case, label), job)
+                )
+        written: dict[Cell, dict[str, Path | BaseException]] = {}
+        with ThreadPoolExecutor() as executor:
+            batches = {
+                writer: executor.submit(
+                    writer.write_many, [job for _, job in writer_jobs], max_workers
+                )
+                for writer, writer_jobs in jobs.items()
+            }
+            for writer, batch in tqdm(batches.items(), unit="writer"):
+                for (cell, _), result in zip(jobs[writer], batch.result()):
+                    written.setdefault(cell, {})[writer.name] = result
         return written
 
-    def _compare(self, written: dict[Cell, dict[str, Future[Path]]]) -> ParityReport:
+    def _compare(
+        self, written: dict[Cell, dict[str, Path | BaseException]]
+    ) -> ParityReport:
         """Compare the files of each cell with parquet-cpp's."""
         created_by: dict[str, str] = {}
         results = []
         for cell, files in written.items():
-            for name, future in files.items():
-                if name not in created_by and future.exception() is None:
-                    created_by[name] = pq.read_metadata(future.result()).created_by
+            for name, result in files.items():
+                if name not in created_by and isinstance(result, Path):
+                    created_by[name] = pq.read_metadata(result).created_by
             reference = files[ParquetCpp.name]
-            others = {name: f for name, f in files.items() if name != ParquetCpp.name}
-            error = reference.exception()
-            if error is not None:
+            others = {name: r for name, r in files.items() if name != ParquetCpp.name}
+            if isinstance(reference, BaseException):
                 prefix = "parquet-cpp failed: "
-                results += [Parity.failed(cell, name, error, prefix) for name in others]
+                results += [
+                    Parity.failed(cell, name, reference, prefix) for name in others
+                ]
                 continue
-            cpp = Layout.read(reference.result())
-            for name, future in others.items():
-                error = future.exception()
-                if error is not None:
-                    results.append(Parity.failed(cell, name, error))
+            cpp = Layout.read(reference)
+            for name, result in others.items():
+                if isinstance(result, BaseException):
+                    results.append(Parity.failed(cell, name, result))
                 else:
-                    layout = Layout.read(future.result())
-                    results.append(Parity.compare(cell, name, cpp, layout))
+                    results.append(Parity.compare(cell, name, cpp, Layout.read(result)))
         return ParityReport(created_by, results)

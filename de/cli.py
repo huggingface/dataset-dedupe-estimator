@@ -24,7 +24,7 @@ from .bench import (
 from .estimate import estimate
 from .fileutils import checkout_file_revisions
 from .pages import Layout, compare
-from .parity import ParityCheck
+from .parity import TYPES, ParityCheck
 from .formats import FileFormat, ParquetCpp, ParquetRs, JsonLines, Sqlite, CdcParams
 from .estimate import compare_formats_tables, compare_formats
 from .synthetic import DataGenerator, evenly_spaced
@@ -534,6 +534,14 @@ def compare_command(run_dirs):
 @click.option(
     "--max-workers", default=None, type=int, help="Files written concurrently"
 )
+@click.option(
+    "--type",
+    "types",
+    multiple=True,
+    type=click.Choice(list(TYPES)),
+    default=list(TYPES),
+    help="Type of the tables, with and without nulls, repeatable, all by default",
+)
 def parity_command(
     directory,
     num_rows,
@@ -542,6 +550,7 @@ def parity_command(
     cdc_max_size,
     cdc_norm_level,
     max_workers,
+    types,
 ):
     """Compare the pages of every writer to parquet-cpp's, per data page version,
     datatype and case.
@@ -550,15 +559,16 @@ def parity_command(
 
     \b
     de parity runs/parity --writer parquet-rs --writer parquet-java --writer duckdb
-    de page-diff runs/parity/v1/plain/parquet-cpp/list-int-*.parquet \\
-        runs/parity/v1/plain/parquet-java/list-int-*.parquet
+    de page-diff runs/parity/v1/plain/parquet-cpp/list-int-cdc-*.parquet \\
+        runs/parity/v1/plain/parquet-java/list-int-cdc-*.parquet
     """
     cdc = CdcParams(
         min_chunk_size=cdc_min_size * 1024,
         max_chunk_size=cdc_max_size * 1024,
         norm_level=cdc_norm_level,
     )
-    check = ParityCheck(directory, [WRITERS[name] for name in writers], num_rows, cdc)
+    writer_formats = [WRITERS[name] for name in writers]
+    check = ParityCheck(directory, writer_formats, num_rows, cdc, types)
     report = check.run(max_workers)
     display.print_parity(report, Console())
 

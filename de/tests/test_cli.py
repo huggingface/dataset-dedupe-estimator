@@ -248,10 +248,13 @@ class TestBenchCommands:
 
     def test_parity(self, runner, tmp_path):
         result = runner.invoke(
-            cli, ["parity", str(tmp_path), "--num-rows", "2000"], env={"COLUMNS": "200"}
+            cli,
+            ["parity", str(tmp_path), "--num-rows", "2000"]
+            + ["--type", "int64", "--type", "list<struct<int>>"],
+            env={"COLUMNS": "200"},
         )
         assert result.exit_code == 0, result.output
-        assert "list<struct<int>>" in result.output
+        assert "list<struct<int>> 10% nulls" in result.output
         assert "parquet-rs, v2 data pages" in result.output
         assert (tmp_path / "v1" / "plain" / "parquet-rs").is_dir()
         assert (tmp_path / "v2" / "plain" / "parquet-rs").is_dir()

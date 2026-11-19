@@ -1,6 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
-import hashlib
 import os
 from pathlib import Path
 import re
@@ -11,11 +10,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from typing import ClassVar, Optional, Sequence
 import tempfile
-import threading
 from de.core import rewrite_to_parquet_rs, write_to_parquet_rs
-
-# one build of cpp/ParquetWrite.cc at a time
-_BUILD_LOCK = threading.Lock()
 
 # a page limit large enough to never cut
 NO_LIMIT = 2**30
@@ -112,6 +107,9 @@ class Parquet(FileFormat):
     page_row_limit: ClassVar[bool] = True
     # whether the implementation can write v2 data pages
     data_page_v2: ClassVar[bool] = True
+    # whether the implementation writes arrow tables, rather than a parquet file's
+    # rewrite that never sees the arrow-only types
+    arrow_input: ClassVar[bool] = True
     use_cdc: bool | CdcParams
     compression: Optional[str] = None
     use_dictionary: bool = True
@@ -216,7 +214,7 @@ class Parquet(FileFormat):
             )
 
     def _options(self) -> list[str]:
-        """The KEY=VALUE options of the ParquetRewrite.java and ParquetWrite.cc programs."""
+        """The KEY=VALUE options of the ParquetRewrite.java program."""
         if isinstance(self.use_cdc, CdcParams):
             cdc = self.use_cdc
             use_cdc = f"{cdc.min_chunk_size},{cdc.max_chunk_size},{cdc.norm_level}"
@@ -253,28 +251,25 @@ class Parquet(FileFormat):
 
 @dataclass(frozen=True)
 class ParquetCpp(Parquet):
-    """parquet-cpp, through pyarrow, or with `batch_size` the cpp/ParquetWrite.cc program.
+    """parquet-cpp, through pyarrow.
 
-    pyarrow's ParquetWriter ends a row group at every write call, so the write calls
-    of batch_size rows go through a program built against pyarrow's own libraries,
-    whose FileWriter::WriteRecordBatch keeps them inside the row groups. It is built
-    with the C++ compiler at CXX (c++ by default) on first use.
+    pyarrow writes every chunk of a table with a column writer call of its own,
+    inside the row groups, so streaming writes a table whose chunks are the batches.
     """
 
     name = "parquet-cpp"
 
     def _write(self, src: pa.Table | Path, dest: Path) -> None:
-        if self.batch_size is not None:
-            # a temporary source file for tables, rewritten by the program
-            super()._write(src, dest)
-            return
         if isinstance(self.use_cdc, CdcParams):
             cdc: bool | dict = asdict(self.use_cdc)
         else:
             cdc = self.use_cdc
-        schema = src.schema if isinstance(src, pa.Table) else pq.read_schema(src)
         if isinstance(src, Path):
             src = pq.read_table(src).combine_chunks()
+        if self.batch_size is not None:
+            # batches of exactly batch_size rows, independent of the source's chunks
+            batches = src.combine_chunks().to_batches(max_chunksize=self.batch_size)
+            src = pa.Table.from_batches(batches, src.schema)
         pq.write_table(
             src,
             dest,
@@ -289,24 +284,8 @@ class ParquetCpp(Parquet):
             # so the page headers carry no statistics, like parquet-rs's and
             # parquet-java's, and the same pages can have the same bytes
             write_page_index=True,
-            column_encoding=self._column_encoding(schema) or None,
+            column_encoding=self._column_encoding(src.schema) or None,
         )
-
-    def _rewrite(self, src: Path, dest: Path) -> None:
-        encoding = ",".join(
-            f"{path}:{name}"
-            for path, name in self._column_encoding(pq.read_schema(src)).items()
-        )
-        options = self._options() + [f"batch_size={self.batch_size}"]
-        if encoding:
-            options.append(f"column_encoding={encoding}")
-        result = subprocess.run(
-            [str(self._program()), str(src), str(dest), *options],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode:
-            raise RuntimeError(f"parquet-cpp failed: {result.stderr}")
 
     def _column_encoding(self, schema: pa.Schema) -> dict[str, str]:
         """The writer version 2.0 encodings of the leaf columns, with v2 data pages
@@ -325,43 +304,6 @@ class ParquetCpp(Parquet):
             for column in columns
             if column.physical_type in V2_ENCODINGS
         }
-
-    @classmethod
-    def _program(cls) -> Path:
-        """The built cpp/ParquetWrite.cc, built once per source and pyarrow install
-        into the temporary directory, linked to that install's libraries."""
-        source = Path(__file__).parent / "cpp" / "ParquetWrite.cc"
-        libdirs = pa.get_library_dirs()
-        install = "\n".join([pa.__version__, pa.get_include(), *libdirs])
-        digest = hashlib.sha256(source.read_bytes() + install.encode())
-        program = (
-            Path(tempfile.gettempdir())
-            / "de"
-            / f"ParquetWrite-{digest.hexdigest()[:16]}"
-        )
-        with _BUILD_LOCK:
-            if program.exists():
-                return program
-            program.parent.mkdir(parents=True, exist_ok=True)
-            pa.create_library_symlinks()
-            cxx = os.environ.get("CXX", "c++")
-            building = program.with_suffix(f".{os.getpid()}.tmp")
-            command = [cxx, "-std=c++20", "-O2", str(source), "-I", pa.get_include()]
-            for libdir in libdirs:
-                command += ["-L", libdir, f"-Wl,-rpath,{libdir}"]
-            command += ["-larrow", "-lparquet"]
-            try:
-                result = subprocess.run(
-                    command + ["-o", str(building)], capture_output=True, text=True
-                )
-            except OSError as e:
-                raise RuntimeError(f"building {source.name} with {cxx} failed: {e}")
-            if result.returncode:
-                raise RuntimeError(
-                    f"building {source.name} with {cxx} failed: {result.stderr}"
-                )
-            os.replace(building, program)
-        return program
 
 
 @dataclass(frozen=True)
@@ -406,6 +348,7 @@ class ParquetJava(Parquet):
 
     name = "parquet-java"
     streaming = False
+    arrow_input = False
 
     def _rewrite(self, src: Path, dest: Path) -> None:
         [error] = self._run([(src, dest, self._options())])
@@ -507,6 +450,7 @@ class ParquetDuckDB(Parquet):
     streaming = False
     page_row_limit = False
     data_page_v2 = False
+    arrow_input = False
 
     def _rewrite(self, src: Path, dest: Path) -> None:
         binary = os.environ.get("DUCKDB_BINARY")

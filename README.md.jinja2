@@ -114,10 +114,9 @@ It also generates a plot comparing the results:
 
 Measure whether the parquet writers keep their content defined chunking state
 across row groups, for both writing a whole table with a single call and
-streaming it in batches, write calls inside the row groups. pyarrow's
-`ParquetWriter` ends a row group at every write call, so parquet-cpp streams
-through `de/cpp/ParquetWrite.cc`, built against pyarrow's own libraries with the
-C++ compiler at `CXX` (`c++` by default) on first use:
+streaming it in batches, write calls inside the row groups. pyarrow writes each
+chunk of a table with a column writer call of its own, inside the row groups, so
+parquet-cpp streams a table whose chunks are the batches:
 
 ```bash
 ❯ de bench runs/stock
@@ -190,15 +189,17 @@ Show the exact pages of a file, or compare the pages of two files:
 ## Parity
 
 Check where the writers write exactly the same pages as parquet-cpp: every writer
-writes a table per datatype with the settings of each case (PLAIN in a single row
-group, row groups, a row or size limit per page, dictionary, snappy and zstd), with
-both v1 and v2 data pages. A cell is identical, has cuts in only one of the files,
+writes a table per datatype, each of the types in `de/parity.py` with and without
+nulls, with the settings of each case (PLAIN in a single row group, row groups, a
+row or size limit per page, dictionary, snappy and zstd), with both v1 and v2 data
+pages. A type a writer can't write as the same parquet type is n/a, as is a case it
+can't express. A cell is identical, has cuts in only one of the files,
 or has pages with the same cuts but different bytes (headers aside). The files are
 kept to inspect any cell with `de page-diff`:
 
 ```bash
 ❯ de parity runs/parity --writer parquet-rs --writer parquet-java --writer duckdb
-❯ de page-diff runs/parity/v1/plain/parquet-cpp/list-int-*.parquet runs/parity/v1/plain/parquet-java/list-int-*.parquet
+❯ de page-diff runs/parity/v1/plain/parquet-cpp/list-int-cdc-*.parquet runs/parity/v1/plain/parquet-java/list-int-cdc-*.parquet
 ```
 
 With v2 data pages every writer uses the encodings of writer version 2.0, the only
