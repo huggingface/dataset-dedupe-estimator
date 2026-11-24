@@ -77,11 +77,8 @@ public class ParquetRewrite {
         case "use_cdc":
           if (value.contains(",")) {
             String[] cdc = value.split(",");
-            builder.withContentDefinedChunking(ContentDefinedChunkingOptions.builder()
-                .withMinChunkSize(Long.parseLong(cdc[0]))
-                .withMaxChunkSize(Long.parseLong(cdc[1]))
-                .withNormLevel(Integer.parseInt(cdc[2]))
-                .build());
+            builder.withContentDefinedChunking(new ContentDefinedChunkingOptions(
+                Long.parseLong(cdc[0]), Long.parseLong(cdc[1]), Integer.parseInt(cdc[2])));
           } else {
             builder.withContentDefinedChunking(
                 Boolean.parseBoolean(value) ? ContentDefinedChunkingOptions.DEFAULT : null);
