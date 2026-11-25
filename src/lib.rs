@@ -29,7 +29,7 @@ fn estimate(
     file_paths: Vec<String>,
     plot: bool,
 ) -> PyResult<(usize, usize, usize)> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let mut stores = ChunkStore::from_files(&file_paths, false)?;
         let merged = ChunkStore::merge(&mut stores, false);
 
@@ -56,7 +56,7 @@ fn chunks(
     file_paths: Vec<String>,
     store_data: bool,
 ) -> PyResult<Vec<(u64, Chunk)>> {
-    py.allow_threads(|| {
+    py.detach(|| {
         let mut stores = ChunkStore::from_files(&file_paths, store_data)?;
         let merged = ChunkStore::merge(&mut stores, store_data);
         Ok(merged.chunks())
@@ -71,7 +71,7 @@ fn rewrite_to_parquet_rs(
     dest_path: String,
     options: WriterOptions,
 ) -> PyResult<()> {
-    py.allow_threads(|| _rewrite_to_parquet_rs(&src_path, &dest_path, &options))
+    py.detach(|| _rewrite_to_parquet_rs(&src_path, &dest_path, &options))
 }
 
 /// Write the record batches of an object with `__arrow_c_stream__`, e.g. a
@@ -86,23 +86,24 @@ fn write_to_parquet_rs(
 ) -> PyResult<()> {
     let capsule = data
         .call_method0("__arrow_c_stream__")?
-        .downcast_into::<PyCapsule>()?;
+        .cast_into::<PyCapsule>()?;
+    let stream = capsule.pointer_checked(Some(c"arrow_array_stream"))?;
     // takes the stream over, leaving a released one to the capsule's destructor
     let reader =
-        unsafe { ArrowArrayStreamReader::from_raw(capsule.pointer() as *mut FFI_ArrowArrayStream) }
+        unsafe { ArrowArrayStreamReader::from_raw(stream.cast::<FFI_ArrowArrayStream>().as_ptr()) }
             .map_err(|e| PyRuntimeError::new_err(format!("Failed to import the stream: {e}")))?;
-    py.allow_threads(|| _write_to_parquet_rs(reader, &dest_path, &options))
+    py.detach(|| _write_to_parquet_rs(reader, &dest_path, &options))
 }
 
 /// Pages of a parquet file in file order, decoded from the page headers.
 #[pyfunction]
 fn parquet_pages(py: Python<'_>, path: String) -> PyResult<Vec<Page>> {
-    py.allow_threads(|| read_pages(&path).map_err(|e| PyRuntimeError::new_err(e.to_string())))
+    py.detach(|| read_pages(&path).map_err(|e| PyRuntimeError::new_err(e.to_string())))
 }
 
 #[pyfunction]
 fn estimate_xet(py: Python<'_>, file_paths: Vec<String>) -> PyResult<u64> {
-    py.allow_threads(|| {
+    py.detach(|| {
         xet::dedup_estimate(file_paths).map_err(|e| PyRuntimeError::new_err(e.to_string()))
     })
 }
