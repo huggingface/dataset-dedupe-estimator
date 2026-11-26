@@ -214,7 +214,7 @@ class Parquet(FileFormat):
             )
 
     def _options(self) -> list[str]:
-        """The KEY=VALUE options of the ParquetRewrite.java program."""
+        """The KEY=VALUE options of the parquet-java and parquet-go programs."""
         if isinstance(self.use_cdc, CdcParams):
             cdc = self.use_cdc
             use_cdc = f"{cdc.min_chunk_size},{cdc.max_chunk_size},{cdc.norm_level}"
@@ -230,6 +230,22 @@ class Parquet(FileFormat):
             data_page_version=self.data_page_version,
         )
         return [f"{key}={value}" for key, value in options.items() if value is not None]
+
+    def _batches(self, table: pa.Table) -> pa.RecordBatchReader:
+        """The record batches of the write calls: a single one with `batch_size=None`,
+        a single chunk keeping its slice, batches of exactly batch_size rows else."""
+        if self.batch_size is None:
+            if any(column.num_chunks > 1 for column in table.columns):
+                table = table.combine_chunks()
+            batches = table.to_batches()
+        else:
+            size = self.batch_size
+            batches = [
+                batch
+                for offset in range(0, len(table), size)
+                for batch in table.slice(offset, size).combine_chunks().to_batches()
+            ]
+        return pa.RecordBatchReader.from_batches(table.schema, batches)
 
     def _write(self, src: pa.Table | Path, dest: Path) -> None:
         """Rewrite the source file, a table is written to a temporary file first.
@@ -321,20 +337,7 @@ class ParquetRs(Parquet):
         if isinstance(src, Path):
             rewrite_to_parquet_rs(str(src), str(dest), self)
             return
-        if self.batch_size is None:
-            # a single write call, a single chunk keeps its slice
-            if any(column.num_chunks > 1 for column in src.columns):
-                src = src.combine_chunks()
-            batches = src.to_batches()
-        else:
-            size = self.batch_size
-            batches = [
-                batch
-                for offset in range(0, len(src), size)
-                for batch in src.slice(offset, size).combine_chunks().to_batches()
-            ]
-        reader = pa.RecordBatchReader.from_batches(src.schema, batches)
-        write_to_parquet_rs(reader, str(dest), self)
+        write_to_parquet_rs(self._batches(src), str(dest), self)
 
 
 @dataclass(frozen=True)
@@ -430,6 +433,39 @@ class ParquetJava(Parquet):
         # the jobs a crashed JVM didn't get to fail with its stderr
         crashed = f"parquet-java failed: {result.stderr}"
         return [outcomes.get(str(dest), crashed) for _, dest, _ in rewrites]
+
+
+@dataclass(frozen=True)
+class ParquetGo(Parquet):
+    """parquet-go (arrow-go), through the go/parquet_write.go program built at
+    PARQUET_GO_BINARY.
+
+    Tables are handed over as an Arrow IPC stream, each record batch is a write
+    call. arrow-go's pages have no row limit, only NO_LIMIT is accepted for
+    max_rows_per_page.
+    """
+
+    name = "parquet-go"
+    page_row_limit = False
+
+    def _write(self, src: pa.Table | Path, dest: Path) -> None:
+        binary = os.environ.get("PARQUET_GO_BINARY")
+        if not binary:
+            raise RuntimeError("set PARQUET_GO_BINARY to use parquet-go")
+        if isinstance(src, Path):
+            src = pq.read_table(src)
+        stream = pa.BufferOutputStream()
+        batches = self._batches(src)
+        with pa.ipc.new_stream(stream, batches.schema) as writer:
+            for batch in batches:
+                writer.write_batch(batch)
+        result = subprocess.run(
+            [binary, str(dest), *self._options()],
+            input=stream.getvalue().to_pybytes(),
+            capture_output=True,
+        )
+        if result.returncode:
+            raise RuntimeError(f"parquet-go failed: {result.stderr.decode()}")
 
 
 @dataclass(frozen=True)

@@ -29,6 +29,7 @@ from .formats import (
     Parquet,
     ParquetCpp,
     ParquetDuckDB,
+    ParquetGo,
     ParquetJava,
     ParquetRs,
     exact_size,
@@ -41,8 +42,10 @@ WRITERS: dict[str, type[Parquet]] = {
     "parquet-rs": ParquetRs,
     "parquet-java": ParquetJava,
     "duckdb": ParquetDuckDB,
+    "parquet-go": ParquetGo,
 }
-# parquet-java needs PARQUET_JAVA_CLASSPATH and duckdb DUCKDB_BINARY, so they are opt-in
+# parquet-java needs PARQUET_JAVA_CLASSPATH, duckdb DUCKDB_BINARY and parquet-go
+# PARQUET_GO_BINARY, so they are opt-in
 DEFAULT_WRITERS = ("parquet-cpp", "parquet-rs")
 EDITS = ("inserted", "deleted")
 SEED = 42

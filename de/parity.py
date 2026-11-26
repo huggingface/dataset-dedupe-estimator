@@ -69,7 +69,7 @@ import pyarrow.parquet as pq
 from tqdm import tqdm
 
 from .bench import MAX_ROW_GROUP_SIZE, NO_PAGE_LIMITS
-from .formats import CdcParams, Parquet, ParquetCpp, ParquetDuckDB
+from .formats import CdcParams, Parquet, ParquetCpp, ParquetDuckDB, ParquetGo
 from .pages import Layout
 from .synthetic import DataGenerator
 
@@ -140,6 +140,9 @@ UNSUPPORTED: dict[str, dict[str, str]] = {
         "fixed": "duckdb writes fixed size binary as variable length binary",
         "decimal256": "duckdb writes decimal(40, 6) as DOUBLE",
         "time32": "duckdb writes TIME(MILLIS) as TIME(MICROS)",
+    },
+    ParquetGo.name: {
+        "duration": "arrow-go can't write duration",
     },
 }
 

@@ -18,6 +18,7 @@ from de.formats import (
     Parquet,
     ParquetCpp,
     ParquetDuckDB,
+    ParquetGo,
     ParquetJava,
     ParquetRs,
     Sqlite,
@@ -281,6 +282,8 @@ class TestParquet:
     def test_row_limit_needs_a_row_limited_writer(self):
         with pytest.raises(ValueError, match="no row limit"):
             ParquetDuckDB(use_cdc=False, max_rows_per_page=10)
+        with pytest.raises(ValueError, match="no row limit"):
+            ParquetGo(use_cdc=False, max_rows_per_page=10)
         fmt = ParquetDuckDB(use_cdc=False, max_rows_per_page=NO_LIMIT)
         assert fmt.paramstem == "rpp=1Gi"
 
@@ -575,6 +578,73 @@ class TestParquetDuckDB:
         unlimited = replace(fmt, data_page_size=NO_LIMIT).write("nodp", ints, tmp_path)
         assert len(Layout.read(limited).cuts(0)) == 9
         assert Layout.read(unlimited).cuts(0) == []
+
+
+needs_go = pytest.mark.skipif(
+    not os.environ.get("PARQUET_GO_BINARY"), reason="PARQUET_GO_BINARY is not set"
+)
+
+
+@needs_go
+class TestParquetGo:
+    def test_row_groups_span_write_calls(self, tmp_path):
+        big_table = pa.table({"x": list(range(100))})
+        path = ParquetGo(use_cdc=False, row_group_size=30, batch_size=7).write(
+            "out", big_table, tmp_path
+        )
+        assert row_group_sizes(path) == [30, 30, 30, 10]
+        assert pq.read_metadata(path).created_by.startswith("parquet-go")
+
+    def test_table_and_path_sources_are_identical(self, tmp_path):
+        data = DataGenerator({"a": "int", "b": "str"}).generate_table(500)
+        src = tmp_path / "src.parquet"
+        pq.write_table(data, src, row_group_size=7)
+        fmt = ParquetGo(use_cdc=CDC, compression="snappy", row_group_size=100)
+        from_table = fmt.write("table", data, tmp_path)
+        from_path = fmt.write("path", src, tmp_path)
+        assert from_table.read_bytes() == from_path.read_bytes()
+
+    def test_arrow_types_round_trip(self, tmp_path):
+        # the arrow schema is stored, so arrow-only types read back as they were
+        schema = {
+            "a": "int",
+            "s": "largestring",
+            "d": "dictionary",
+            "c": ["int"],
+            "x": {"y": "float"},
+        }
+        data = DataGenerator(schema).generate_table(1000)
+        path = ParquetGo(use_cdc=CDC, use_dictionary=False).write("out", data, tmp_path)
+        assert pq.read_table(path).schema == data.schema
+
+    def test_v2_data_pages(self, tmp_path):
+        data = pa.table({"x": list(range(100)), "s": [str(i) for i in range(100)]})
+        fmt = ParquetGo(use_cdc=False, use_dictionary=False, data_page_version="2.0")
+        pages = Layout.read(fmt.write("out", data, tmp_path)).pages
+        assert [(p["page_type"], p["encoding"]) for p in pages] == [
+            ("data_page_v2", "delta_binary_packed"),
+            ("data_page_v2", "delta_byte_array"),
+        ]
+
+    def test_cdc_options_are_passed(self, tmp_path):
+        data = DataGenerator({"a": "int"}).generate_table(100_000)
+        small = CdcParams(min_chunk_size=4096, max_chunk_size=16384, norm_level=0)
+        fmt = ParquetGo(use_cdc=small, use_dictionary=False, data_page_size=NO_LIMIT)
+        cuts = Layout.read(fmt.write("out", data, tmp_path)).cuts(0)
+        # 800KB of int64 values in chunks of 4 to 16KiB
+        assert 50 < len(cuts) < 200
+
+    def test_errors_carry_the_arrow_go_message(self, tmp_path, table):
+        fmt = ParquetGo(use_cdc=False, compression="nonexistent")
+        with pytest.raises(
+            RuntimeError, match="parquet-go failed: compression nonexistent"
+        ):
+            fmt.write("out", table, tmp_path)
+
+    def test_missing_binary(self, tmp_path, table, monkeypatch):
+        monkeypatch.delenv("PARQUET_GO_BINARY")
+        with pytest.raises(RuntimeError, match="set PARQUET_GO_BINARY"):
+            ParquetGo(use_cdc=False).write("out", table, tmp_path)
 
 
 class TestJsonLines:

@@ -177,6 +177,18 @@ limit, so it skips the `aligned` profile:
 ❯ de bench runs/duckdb --writer parquet-cpp --writer parquet-rs --writer duckdb
 ```
 
+parquet-go is opt-in too: `de/go/parquet_write.go` writes the tables with arrow-go,
+handed over as an Arrow IPC stream whose record batches are the write calls, with the
+binary at `PARQUET_GO_BINARY`. Build it from an arrow-go checkout with content defined
+chunking, [arrow-go#1469](https://github.com/apache/arrow-go/pull/1469). arrow-go
+pages have no row limit, so it skips the `aligned` profile:
+
+```bash
+❯ gh pr checkout 1469 && go build -o parquet-go ~/Workspace/de/de/go/parquet_write.go
+❯ export PARQUET_GO_BINARY=$PWD/parquet-go
+❯ de bench runs/go --writer parquet-cpp --writer parquet-rs --writer parquet-go
+```
+
 Show the exact pages of a file, or compare the pages of two files:
 
 ```bash
@@ -198,7 +210,7 @@ or has pages with the same cuts but different bytes (headers aside). The files a
 kept to inspect any cell with `de page-diff`:
 
 ```bash
-❯ de parity runs/parity --writer parquet-rs --writer parquet-java --writer duckdb
+❯ de parity runs/parity --writer parquet-rs --writer parquet-java --writer duckdb --writer parquet-go
 ❯ de page-diff runs/parity/v1/plain/parquet-cpp/list-int-cdc-*.parquet runs/parity/v1/plain/parquet-java/list-int-cdc-*.parquet
 ```
 

@@ -2,16 +2,16 @@
 
 Every writer writes the same generated single column tables with the same settings,
 and the assertions only read the page layouts of the files, so parquet-cpp,
-parquet-rs, parquet-java and DuckDB are held to one standard. No writer is the
-reference: the tests state what a correct chunker writes, whether the writers write
-the same pages is de parity's question.
+parquet-rs, parquet-java, DuckDB and parquet-go are held to one standard. No writer
+is the reference: the tests state what a correct chunker writes, whether the writers
+write the same pages is de parity's question.
 
 The most important property is that a writer carries its chunker state across row
 groups and write calls: a row group boundary forces a page cut, but the content
 defined cuts after it stay where a single row group puts them.
 
-parquet-java and DuckDB are skipped unless PARQUET_JAVA_CLASSPATH and DUCKDB_BINARY
-are set. Settings a writer can't express are skipped, a known bug fails.
+parquet-java, DuckDB and parquet-go are skipped unless PARQUET_JAVA_CLASSPATH,
+DUCKDB_BINARY and PARQUET_GO_BINARY are set. Settings a writer can't express are skipped, a known bug fails.
 """
 
 from dataclasses import dataclass, replace
@@ -34,6 +34,7 @@ from de.formats import (
     Parquet,
     ParquetCpp,
     ParquetDuckDB,
+    ParquetGo,
     ParquetJava,
     ParquetRs,
 )
@@ -144,6 +145,13 @@ WRITERS = [
         ParquetDuckDB,
         marks=pytest.mark.skipif(
             not os.environ.get("DUCKDB_BINARY"), reason="DUCKDB_BINARY is not set"
+        ),
+    ),
+    pytest.param(
+        ParquetGo,
+        marks=pytest.mark.skipif(
+            not os.environ.get("PARQUET_GO_BINARY"),
+            reason="PARQUET_GO_BINARY is not set",
         ),
     ),
 ]
