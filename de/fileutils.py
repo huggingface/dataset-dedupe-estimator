@@ -1,4 +1,3 @@
-import json
 import subprocess
 import os
 from pathlib import Path
@@ -62,15 +61,3 @@ def checkout_file_revisions(
         # rename the file to include the commit hash
         new_file = target_dir / f"{file_path.stem}-{rev}{file_path.suffix}"
         os.rename(target_dir / git_file, new_file)
-
-
-def get_page_chunk_sizes(paths):
-    # get the result of parquet-layout command
-    for path in paths:
-        output = subprocess.check_output(["parquet-layout", path], text=True)
-        meta = json.loads(output)
-        for row_group in meta["row_groups"]:
-            for column in row_group["columns"]:
-                for page in column["pages"]:
-                    if page["page_type"].startswith("data"):
-                        yield page["uncompressed_bytes"], page["num_values"]
